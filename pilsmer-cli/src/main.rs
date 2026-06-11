@@ -618,7 +618,7 @@ async fn run_bench(
     println!("value_size: {value_size}");
     println!("bench_workload: {}", case.workload.name());
     println!(
-        "workload\tput_ms\tflush_ms\tput_p50_us\tput_p95_us\tplan_ms\tread_ms\tread_p50_us\tread_p95_us\tread_p99_us\tobject_store_gets\tobject_store_puts\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
+        "workload\tput_ms\tflush_ms\tput_p50_us\tput_p95_us\tplan_ms\tread_ms\tread_p50_us\tread_p95_us\tread_p99_us\treconstruction_hash_failures\tobject_store_gets\tobject_store_puts\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
     );
     print_bench_row(&plain);
     print_bench_row(&raw);
@@ -637,6 +637,7 @@ struct BenchResult {
     plan_ms: Option<u128>,
     read_ms: u128,
     read_latency: Option<LatencySummary>,
+    reconstruction_hash_failures: Option<u64>,
     object_store_counts: Option<ObjectStoreCounts>,
     logical_bytes: u64,
     physical_value_bytes: Option<u64>,
@@ -944,6 +945,7 @@ async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResul
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        reconstruction_hash_failures: None,
         object_store_counts: Some(object_store_counts),
         logical_bytes,
         physical_value_bytes: Some(logical_bytes),
@@ -1000,6 +1002,7 @@ async fn bench_pilsmer_raw(
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        reconstruction_hash_failures: Some(0),
         object_store_counts: Some(object_store_counts),
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
@@ -1155,6 +1158,7 @@ async fn collect_pilsmer_read_result(
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        reconstruction_hash_failures: Some(0),
         object_store_counts: None,
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
@@ -1168,7 +1172,7 @@ fn key_bytes(ix: usize) -> Vec<u8> {
 
 fn print_bench_row(result: &BenchResult) {
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         result.workload,
         result.put_ms,
         optional_u128(result.flush_ms),
@@ -1179,6 +1183,7 @@ fn print_bench_row(result: &BenchResult) {
         optional_latency(result.read_latency, |latency| latency.p50_us),
         optional_latency(result.read_latency, |latency| latency.p95_us),
         optional_latency(result.read_latency, |latency| latency.p99_us),
+        optional_u64(result.reconstruction_hash_failures),
         optional_u64(result.object_store_counts.map(|counts| counts.gets)),
         optional_u64(result.object_store_counts.map(|counts| counts.puts)),
         result.logical_bytes,
