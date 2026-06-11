@@ -3,15 +3,21 @@ use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+pub use compaction_filter::{
+    CompactionMode, PiLsmCompactionFilterStats, PiLsmCompactionFilterSupplier,
+};
 use pilsmer_core::{
     explain_envelope, DecodeLimits, ExplainValue, PiLsmError, PlanOptions, Planner, Reconstructor,
     Result as CoreResult, StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
+use slatedb::object_store::path::Path as ObjectStorePath;
 use slatedb::object_store::ObjectStore;
-use slatedb::{Db, DbIterator};
+use slatedb::{CompactorBuilder, Db, DbIterator};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
+mod compaction_filter;
 
 pub type Result<T> = std::result::Result<T, PiLsmDbError>;
 
@@ -108,6 +114,25 @@ impl PiLsmDb {
         P: Into<slatedb::object_store::path::Path>,
     {
         let inner = Db::open(path, object_store).await?;
+        Ok(Self::from_db(inner, opts))
+    }
+
+    pub async fn open_with_compaction_filter<P>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+        opts: PiLsmOptions,
+        supplier: Arc<PiLsmCompactionFilterSupplier>,
+    ) -> Result<Self>
+    where
+        P: Into<slatedb::object_store::path::Path>,
+    {
+        let path: ObjectStorePath = path.into();
+        let compactor_builder = CompactorBuilder::new(path.clone(), object_store.clone())
+            .with_compaction_filter_supplier(supplier);
+        let inner = Db::builder(path, object_store)
+            .with_compactor_builder(compactor_builder)
+            .build()
+            .await?;
         Ok(Self::from_db(inner, opts))
     }
 
