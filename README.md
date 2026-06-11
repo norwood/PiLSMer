@@ -64,7 +64,8 @@ and philosophical compression status.
 
 The default stream is `sha256-counter:v1` because it can produce arbitrary
 prefix sizes. The default SHA prefix is 16 MiB; pass `--prefix-bytes` for
-faster toy runs. The pi demo stream is available with `--stream pi-prefix` and
+faster toy runs. The pi, e, and sqrt(2) demo streams are available with
+`--stream pi-prefix`, `--stream e-prefix`, and `--stream sqrt2-prefix`; each has
 a 256-byte built-in prefix:
 
 ```sh
@@ -121,7 +122,7 @@ Global options:
 --max-k <k>
 --plan-codec compact-binary|ceremonial-cbor
 --allow-literals
---stream sha256-counter|pi-prefix
+--stream sha256-counter|pi-prefix|e-prefix|sqrt2-prefix
 --disable-embedded-compactor
 ```
 

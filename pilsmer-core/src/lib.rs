@@ -20,7 +20,8 @@ pub use plan::{
 pub use planner::{PlanOptions, Planner};
 pub use reconstruct::Reconstructor;
 pub use stream::{
-    pi_hex_fraction_prefix_stream, ByteStream, PrefixByteStream, Sha256CounterStream,
-    StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
+    e_hex_fraction_prefix_stream, pi_hex_fraction_prefix_stream, sqrt2_hex_fraction_prefix_stream,
+    ByteStream, PrefixByteStream, Sha256CounterStream, StreamRegistry, E_HEX_FRACTION_PREFIX_BYTES,
+    PI_HEX_FRACTION_PREFIX_BYTES, SQRT2_HEX_FRACTION_PREFIX_BYTES,
 };
 pub use stream_index::{IndexedChunk, StreamIndex, StreamIndexOptions};

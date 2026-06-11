@@ -10,9 +10,10 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::stream::BoxStream;
 use pilsmer_core::{
-    pi_hex_fraction_prefix_stream, ByteStream, ExplainValue, PhilosophicalCompressionRatio,
-    PlanCodec, PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex,
-    StreamIndexOptions, StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
+    e_hex_fraction_prefix_stream, pi_hex_fraction_prefix_stream, sqrt2_hex_fraction_prefix_stream,
+    ByteStream, ExplainValue, PhilosophicalCompressionRatio, PlanCodec, PlanOptions, Planner,
+    Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions, StreamRegistry,
+    E_HEX_FRACTION_PREFIX_BYTES, PI_HEX_FRACTION_PREFIX_BYTES, SQRT2_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
     run_compactor_with_options, CompactionMode, PiLsmCompactionFilterStats,
@@ -129,6 +130,8 @@ enum Command {
 enum StreamKind {
     Sha256Counter,
     PiPrefix,
+    EPrefix,
+    Sqrt2Prefix,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -434,6 +437,8 @@ fn default_prefix_bytes(stream_kind: StreamKind) -> u64 {
     match stream_kind {
         StreamKind::Sha256Counter => PlanOptions::default().max_prefix_len,
         StreamKind::PiPrefix => PI_HEX_FRACTION_PREFIX_BYTES as u64,
+        StreamKind::EPrefix => E_HEX_FRACTION_PREFIX_BYTES as u64,
+        StreamKind::Sqrt2Prefix => SQRT2_HEX_FRACTION_PREFIX_BYTES as u64,
     }
 }
 
@@ -1885,6 +1890,10 @@ async fn build_runtime(plan_options: &PlanOptions, stream_kind: StreamKind) -> R
         StreamKind::PiPrefix => {
             Arc::new(pi_hex_fraction_prefix_stream(plan_options.max_prefix_len)?)
         }
+        StreamKind::EPrefix => Arc::new(e_hex_fraction_prefix_stream(plan_options.max_prefix_len)?),
+        StreamKind::Sqrt2Prefix => Arc::new(sqrt2_hex_fraction_prefix_stream(
+            plan_options.max_prefix_len,
+        )?),
     };
     let mut registry = StreamRegistry::new();
     registry.register(stream.clone());
