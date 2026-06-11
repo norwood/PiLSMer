@@ -1,5 +1,5 @@
 [workspace]
-members = ["pilsmer-core", "pilsmer-slate"]
+members = ["pilsmer-core", "pilsmer-slate", "pilsmer-cli"]
 resolver = "2"
 
 [workspace.package]
