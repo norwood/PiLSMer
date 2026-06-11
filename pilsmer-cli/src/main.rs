@@ -416,18 +416,54 @@ async fn run_bench(
     }
 
     let values = generate_values(value_count, value_size).await?;
+    let compact_options = PlanOptions {
+        plan_codec: PlanCodec::CompactBinary,
+        ..plan_options.clone()
+    };
+    let ceremonial_options = PlanOptions {
+        plan_codec: PlanCodec::CeremonialCbor,
+        ..plan_options.clone()
+    };
+    let humiliation_options = PlanOptions {
+        max_k: 1,
+        plan_codec: PlanCodec::CeremonialCbor,
+        ..plan_options.clone()
+    };
+    let vacuum_options = PlanOptions {
+        max_k: plan_options.max_k.max(3),
+        plan_codec: PlanCodec::CompactBinary,
+        ..plan_options.clone()
+    };
+
     let plain = bench_plain_slate(&path.join("plain-slate"), &values).await?;
     let raw = bench_pilsmer_raw(
         &path.join("pilsmer-raw"),
         &values,
-        plan_options,
+        &compact_options,
         stream_kind,
     )
     .await?;
-    let planned = bench_pilsmer_planned(
-        &path.join("pilsmer-planned"),
+    let compact = bench_pilsmer_planned(
+        "pilsmer-compact-plan",
+        &path.join("pilsmer-compact-plan"),
         &values,
-        plan_options,
+        &compact_options,
+        stream_kind,
+    )
+    .await?;
+    let ceremonial = bench_pilsmer_planned(
+        "pilsmer-ceremonial-plan",
+        &path.join("pilsmer-ceremonial-plan"),
+        &values,
+        &ceremonial_options,
+        stream_kind,
+    )
+    .await?;
+    let vacuumed = bench_pilsmer_vacuumed(
+        &path.join("pilsmer-vacuumed"),
+        &values,
+        &humiliation_options,
+        &vacuum_options,
         stream_kind,
     )
     .await?;
@@ -439,7 +475,9 @@ async fn run_bench(
     );
     print_bench_row(&plain);
     print_bench_row(&raw);
-    print_bench_row(&planned);
+    print_bench_row(&compact);
+    print_bench_row(&ceremonial);
+    print_bench_row(&vacuumed);
     Ok(())
 }
 
@@ -552,6 +590,7 @@ async fn bench_pilsmer_raw(
 }
 
 async fn bench_pilsmer_planned(
+    workload: &'static str,
     path: &Path,
     values: &[Vec<u8>],
     plan_options: &PlanOptions,
@@ -579,29 +618,99 @@ async fn bench_pilsmer_planned(
     db.flush().await?;
     let plan_ms = plan_start.elapsed().as_millis();
 
+    let mut result = collect_pilsmer_read_result(&db, workload, values.len()).await?;
+    result.put_ms = put_ms;
+    result.plan_ms = Some(plan_ms);
+    db.close().await?;
+    Ok(result)
+}
+
+async fn bench_pilsmer_vacuumed(
+    path: &Path,
+    values: &[Vec<u8>],
+    seed_options: &PlanOptions,
+    vacuum_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<BenchResult> {
+    let db = open_db(path, seed_options, stream_kind).await?;
+
+    let put_start = Instant::now();
+    for (ix, value) in values.iter().enumerate() {
+        db.put(key_bytes(ix), value.as_slice()).await?;
+    }
+    db.flush().await?;
+    let put_ms = put_start.elapsed().as_millis();
+
+    let rewrite_start = Instant::now();
+    for ix in 0..values.len() {
+        let report = db.plan_key(key_bytes(ix), seed_options.clone()).await?;
+        if !matches!(
+            report.status,
+            RewriteStatus::Rewritten | RewriteStatus::KeptAlreadyPlanned
+        ) {
+            bail!(
+                "humiliation planning failed for bench key {ix}: {:?}",
+                report.status
+            );
+        }
+    }
+    db.flush().await?;
+    db.close().await?;
+
+    let db = open_db(path, vacuum_options, stream_kind).await?;
+    for ix in 0..values.len() {
+        let report = db
+            .vacuum_meaning(key_bytes(ix), vacuum_options.clone())
+            .await?;
+        if !matches!(
+            report.status,
+            RewriteStatus::Rewritten
+                | RewriteStatus::KeptAlreadyPlanned
+                | RewriteStatus::SkippedNotImproved
+        ) {
+            bail!(
+                "vacuum planning failed for bench key {ix}: {:?}",
+                report.status
+            );
+        }
+    }
+    db.flush().await?;
+    let rewrite_ms = rewrite_start.elapsed().as_millis();
+
+    let mut result = collect_pilsmer_read_result(&db, "pilsmer-vacuumed", values.len()).await?;
+    result.put_ms = put_ms;
+    result.plan_ms = Some(rewrite_ms);
+    db.close().await?;
+    Ok(result)
+}
+
+async fn collect_pilsmer_read_result(
+    db: &PiLsmDb,
+    workload: &'static str,
+    value_count: usize,
+) -> Result<BenchResult> {
     let read_start = Instant::now();
     let mut logical_bytes = 0_u64;
     let mut physical_value_bytes = 0_u64;
     let mut chunks = 0_u64;
-    for ix in 0..values.len() {
+    for ix in 0..value_count {
         let key = key_bytes(ix);
         let Some(value) = db.get(&key).await? else {
-            bail!("missing PiLSMer planned bench key {ix}");
+            bail!("missing PiLSMer bench key {ix}");
         };
         logical_bytes += value.len() as u64;
         let Some(explain) = db.explain(&key).await? else {
-            bail!("missing PiLSMer planned explain key {ix}");
+            bail!("missing PiLSMer bench explain key {ix}");
         };
         physical_value_bytes += explain.physical_value_bytes;
         chunks += explain.chunks;
     }
     let read_ms = read_start.elapsed().as_millis();
-    db.close().await?;
 
     Ok(BenchResult {
-        workload: "pilsmer-planned",
-        put_ms,
-        plan_ms: Some(plan_ms),
+        workload,
+        put_ms: 0,
+        plan_ms: None,
         read_ms,
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
