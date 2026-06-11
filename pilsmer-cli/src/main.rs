@@ -1004,6 +1004,10 @@ fn print_metrics(metrics: &PiLsmMetrics) {
         metrics.planned_logical_bytes_total
     );
     println!(
+        "pilsmer_raw_bytes_converted_total {}",
+        metrics.raw_bytes_converted_total
+    );
+    println!(
         "pilsmer_raw_envelope_bytes_total {}",
         metrics.raw_envelope_bytes_total
     );
@@ -1031,6 +1035,14 @@ fn print_metrics(metrics: &PiLsmMetrics) {
         "pilsmer_philosophical_user_value_bytes_stored_total {}",
         metrics.philosophical_user_value_bytes_stored_total
     );
+    println!(
+        "pilsmer_reconstruction_seconds {}",
+        metric_seconds(metrics.reconstruction_seconds)
+    );
+    println!(
+        "pilsmer_planner_seconds {}",
+        metric_seconds(metrics.planner_seconds)
+    );
     println!("pilsmer_chunks_total {}", metrics.chunks_total);
     println!(
         "pilsmer_chunks_per_value {}",
@@ -1053,13 +1065,41 @@ fn print_metrics(metrics: &PiLsmMetrics) {
         metric_philosophical_ratio(metrics.philosophical_compression_ratio)
     );
     println!(
+        "pilsmer_compaction_filter_errors_total {}",
+        metrics.compaction_filter_errors_total
+    );
+    println!(
+        "pilsmer_snapshot_protected_entries_total {}",
+        metrics.snapshot_protected_entries_total
+    );
+    println!(
+        "pilsmer_vacuum_meaning_attempts_total {}",
+        metrics.vacuum_meaning_attempts_total
+    );
+    println!(
+        "pilsmer_vacuum_meaning_improvements_total {}",
+        metrics.vacuum_meaning_improvements_total
+    );
+    println!(
+        "pilsmer_reconstruction_cache_bytes {}",
+        metrics.reconstruction_cache_bytes
+    );
+    println!(
         "pilsmer_philosophical_purity_violations_total {}",
         metrics.philosophical_purity_violations_total
+    );
+    println!(
+        "pilsmer_representation_entropy_excuses_total {}",
+        metrics.representation_entropy_excuses_total
     );
 }
 
 fn metric_optional(value: Option<f64>) -> String {
     value.map_or_else(|| "undefined".to_string(), |value| format!("{value:.6}"))
+}
+
+fn metric_seconds(value: f64) -> String {
+    format!("{value:.9}")
 }
 
 fn metric_philosophical_ratio(value: PhilosophicalCompressionRatio) -> String {

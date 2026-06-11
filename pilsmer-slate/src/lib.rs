@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::ops::RangeBounds;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 pub use compaction_filter::{
@@ -152,6 +153,7 @@ pub struct PiLsmDb {
     decode_limits: DecodeLimits,
     max_reconstruct_bytes: u64,
     locks: Arc<KeyLocks>,
+    counters: Arc<OperationCounters>,
 }
 
 #[derive(Default)]
@@ -166,6 +168,60 @@ impl KeyLocks {
             .entry(key.to_vec())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
+    }
+}
+
+#[derive(Default)]
+struct OperationCounters {
+    raw_bytes_converted_total: AtomicU64,
+    planner_nanos: AtomicU64,
+    reconstruction_nanos: AtomicU64,
+    vacuum_meaning_attempts_total: AtomicU64,
+    vacuum_meaning_improvements_total: AtomicU64,
+    compaction_filter_errors_total: AtomicU64,
+    snapshot_protected_entries_total: AtomicU64,
+    reconstruction_cache_bytes: AtomicU64,
+    representation_entropy_excuses_total: AtomicU64,
+}
+
+impl OperationCounters {
+    fn add_raw_bytes_converted(&self, bytes: u64) {
+        self.add(&self.raw_bytes_converted_total, bytes);
+    }
+
+    fn add_planner_duration(&self, duration: Duration) {
+        self.add_duration(&self.planner_nanos, duration);
+    }
+
+    fn add_reconstruction_duration(&self, duration: Duration) {
+        self.add_duration(&self.reconstruction_nanos, duration);
+    }
+
+    fn increment_vacuum_attempts(&self) {
+        self.add(&self.vacuum_meaning_attempts_total, 1);
+    }
+
+    fn increment_vacuum_improvements(&self) {
+        self.add(&self.vacuum_meaning_improvements_total, 1);
+    }
+
+    fn increment_entropy_excuses(&self) {
+        self.add(&self.representation_entropy_excuses_total, 1);
+    }
+
+    fn load(&self, counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
+
+    fn add_duration(&self, counter: &AtomicU64, duration: Duration) {
+        let nanos = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        self.add(counter, nanos);
+    }
+
+    fn add(&self, counter: &AtomicU64, value: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(value))
+        });
     }
 }
 
@@ -248,6 +304,7 @@ pub struct PiLsmIterator {
     decode_limits: DecodeLimits,
     reconstruct: bool,
     max_reconstruct_bytes: u64,
+    counters: Arc<OperationCounters>,
 }
 
 pub struct PiLsmEnvelopeIterator {
@@ -294,6 +351,7 @@ pub struct PiLsmMetrics {
     pub planned_values_total: u64,
     pub logical_bytes_total: u64,
     pub planned_logical_bytes_total: u64,
+    pub raw_bytes_converted_total: u64,
     pub raw_envelope_bytes_total: u64,
     pub plan_envelope_bytes_total: u64,
     pub plan_metadata_bytes_total: u64,
@@ -301,13 +359,21 @@ pub struct PiLsmMetrics {
     pub literal_user_bytes_total: u64,
     pub physical_value_bytes_total: u64,
     pub philosophical_user_value_bytes_stored_total: u64,
+    pub reconstruction_seconds: f64,
+    pub planner_seconds: f64,
     pub chunks_total: u64,
     pub chunks_per_value: Option<f64>,
     pub avg_chunk_len_bytes: Option<f64>,
     pub longest_natural_run_bytes: u32,
     pub metadata_amplification_ratio: Option<f64>,
     pub philosophical_compression_ratio: PhilosophicalCompressionRatio,
+    pub compaction_filter_errors_total: u64,
+    pub snapshot_protected_entries_total: u64,
+    pub vacuum_meaning_attempts_total: u64,
+    pub vacuum_meaning_improvements_total: u64,
+    pub reconstruction_cache_bytes: u64,
     pub philosophical_purity_violations_total: u64,
+    pub representation_entropy_excuses_total: u64,
 }
 
 impl Default for PiLsmMetrics {
@@ -317,6 +383,7 @@ impl Default for PiLsmMetrics {
             planned_values_total: 0,
             logical_bytes_total: 0,
             planned_logical_bytes_total: 0,
+            raw_bytes_converted_total: 0,
             raw_envelope_bytes_total: 0,
             plan_envelope_bytes_total: 0,
             plan_metadata_bytes_total: 0,
@@ -324,13 +391,21 @@ impl Default for PiLsmMetrics {
             literal_user_bytes_total: 0,
             physical_value_bytes_total: 0,
             philosophical_user_value_bytes_stored_total: 0,
+            reconstruction_seconds: 0.0,
+            planner_seconds: 0.0,
             chunks_total: 0,
             chunks_per_value: None,
             avg_chunk_len_bytes: None,
             longest_natural_run_bytes: 0,
             metadata_amplification_ratio: None,
             philosophical_compression_ratio: PhilosophicalCompressionRatio::Undefined,
+            compaction_filter_errors_total: 0,
+            snapshot_protected_entries_total: 0,
+            vacuum_meaning_attempts_total: 0,
+            vacuum_meaning_improvements_total: 0,
+            reconstruction_cache_bytes: 0,
             philosophical_purity_violations_total: 0,
+            representation_entropy_excuses_total: 0,
         }
     }
 }
@@ -376,6 +451,7 @@ impl PiLsmDb {
             decode_limits: opts.decode_limits,
             max_reconstruct_bytes: opts.max_reconstruct_bytes,
             locks: Arc::new(KeyLocks::default()),
+            counters: Arc::new(OperationCounters::default()),
         }
     }
 
@@ -401,7 +477,7 @@ impl PiLsmDb {
         let key_bytes = key.as_ref().to_vec();
         let _guard = self.lock_key(&key_bytes).await;
         let envelope = if options.allow_immediate_plan {
-            ValueEnvelope::Plan(self.planner.plan(value.as_ref()).await?)
+            ValueEnvelope::Plan(self.plan_bytes(value.as_ref()).await?)
         } else {
             ValueEnvelope::Raw(Bytes::copy_from_slice(value.as_ref()))
         };
@@ -490,6 +566,7 @@ impl PiLsmDb {
             max_reconstruct_bytes: options
                 .max_reconstruct_bytes
                 .unwrap_or(self.max_reconstruct_bytes),
+            counters: self.counters.clone(),
         })
     }
 
@@ -521,6 +598,7 @@ impl PiLsmDb {
         while let Some(kv) = values.next().await? {
             metrics.observe(&kv.explain);
         }
+        metrics.observe_counters(&self.counters);
         metrics.finish();
         Ok(metrics)
     }
@@ -562,9 +640,10 @@ impl PiLsmDb {
             return Ok(PlanReport::missing());
         };
 
-        let plan = match self.planner.plan_with_options(&logical_bytes, opts).await {
+        let plan = match self.plan_bytes_with_options(&logical_bytes, opts).await {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
+                self.counters.increment_entropy_excuses();
                 return Ok(PlanReport {
                     status: RewriteStatus::SkippedPlanningFailed,
                     source_envelope_hash: Some(source_hash),
@@ -579,20 +658,26 @@ impl PiLsmDb {
         let new_chunk_count = plan.chunks.len();
         let encoded_plan = ValueEnvelope::Plan(plan).encode();
 
-        self.write_if_source_unchanged(
-            key_bytes,
-            source_hash,
-            encoded_plan,
-            PlanReport {
-                status: RewriteStatus::Rewritten,
-                source_envelope_hash: Some(source_hash),
-                old_envelope_bytes: Some(old_envelope_bytes),
-                new_envelope_bytes: None,
-                old_chunk_count: None,
-                new_chunk_count: Some(new_chunk_count),
-            },
-        )
-        .await
+        let report = self
+            .write_if_source_unchanged(
+                key_bytes,
+                source_hash,
+                encoded_plan,
+                PlanReport {
+                    status: RewriteStatus::Rewritten,
+                    source_envelope_hash: Some(source_hash),
+                    old_envelope_bytes: Some(old_envelope_bytes),
+                    new_envelope_bytes: None,
+                    old_chunk_count: None,
+                    new_chunk_count: Some(new_chunk_count),
+                },
+            )
+            .await?;
+        if report.status == RewriteStatus::Rewritten {
+            self.counters
+                .add_raw_bytes_converted(logical_bytes.len() as u64);
+        }
+        Ok(report)
     }
 
     pub async fn vacuum_meaning<K, O>(&self, key: K, options: O) -> Result<VacuumReport>
@@ -601,6 +686,7 @@ impl PiLsmDb {
         O: Into<VacuumOptions>,
     {
         let options = options.into();
+        self.counters.increment_vacuum_attempts();
         let key_bytes = key.as_ref().to_vec();
         let Some((source_hash, envelope, old_encoded_len)) = ({
             let _guard = self.lock_key(&key_bytes).await;
@@ -615,8 +701,7 @@ impl PiLsmDb {
 
         let old_chunk_count = old_plan.chunks.len();
         let logical_bytes = self
-            .reconstructor
-            .reconstruct_with_limit(
+            .reconstruct_plan(
                 &old_plan,
                 options
                     .max_reconstruct_bytes
@@ -624,12 +709,12 @@ impl PiLsmDb {
             )
             .await?;
         let new_plan = match self
-            .planner
-            .plan_with_options(&logical_bytes, options.plan_options)
+            .plan_bytes_with_options(&logical_bytes, options.plan_options)
             .await
         {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
+                self.counters.increment_entropy_excuses();
                 return Ok(PlanReport {
                     status: RewriteStatus::SkippedPlanningFailed,
                     source_envelope_hash: Some(source_hash),
@@ -659,20 +744,25 @@ impl PiLsmDb {
             });
         }
 
-        self.write_if_source_unchanged(
-            key_bytes,
-            source_hash,
-            encoded_plan,
-            PlanReport {
-                status: RewriteStatus::Rewritten,
-                source_envelope_hash: Some(source_hash),
-                old_envelope_bytes: Some(old_encoded_len),
-                new_envelope_bytes: None,
-                old_chunk_count: Some(old_chunk_count),
-                new_chunk_count: Some(new_chunk_count),
-            },
-        )
-        .await
+        let report = self
+            .write_if_source_unchanged(
+                key_bytes,
+                source_hash,
+                encoded_plan,
+                PlanReport {
+                    status: RewriteStatus::Rewritten,
+                    source_envelope_hash: Some(source_hash),
+                    old_envelope_bytes: Some(old_encoded_len),
+                    new_envelope_bytes: None,
+                    old_chunk_count: Some(old_chunk_count),
+                    new_chunk_count: Some(new_chunk_count),
+                },
+            )
+            .await?;
+        if report.status == RewriteStatus::Rewritten {
+            self.counters.increment_vacuum_improvements();
+        }
+        Ok(report)
     }
 
     async fn logical_bytes(
@@ -682,12 +772,40 @@ impl PiLsmDb {
     ) -> CoreResult<Bytes> {
         match envelope {
             ValueEnvelope::Raw(bytes) => Ok(bytes),
-            ValueEnvelope::Plan(plan) => {
-                self.reconstructor
-                    .reconstruct_with_limit(&plan, max_reconstruct_bytes)
-                    .await
-            }
+            ValueEnvelope::Plan(plan) => self.reconstruct_plan(&plan, max_reconstruct_bytes).await,
         }
+    }
+
+    async fn plan_bytes(&self, bytes: &[u8]) -> CoreResult<pilsmer_core::ReconstructionPlan> {
+        let start = Instant::now();
+        let result = self.planner.plan(bytes).await;
+        self.counters.add_planner_duration(start.elapsed());
+        result
+    }
+
+    async fn plan_bytes_with_options(
+        &self,
+        bytes: &[u8],
+        options: PlanOptions,
+    ) -> CoreResult<pilsmer_core::ReconstructionPlan> {
+        let start = Instant::now();
+        let result = self.planner.plan_with_options(bytes, options).await;
+        self.counters.add_planner_duration(start.elapsed());
+        result
+    }
+
+    async fn reconstruct_plan(
+        &self,
+        plan: &pilsmer_core::ReconstructionPlan,
+        max_reconstruct_bytes: u64,
+    ) -> CoreResult<Bytes> {
+        let start = Instant::now();
+        let result = self
+            .reconstructor
+            .reconstruct_with_limit(plan, max_reconstruct_bytes)
+            .await;
+        self.counters.add_reconstruction_duration(start.elapsed());
+        result
     }
 
     async fn read_current_envelope(
@@ -774,9 +892,13 @@ impl PiLsmIterator {
         let value = match envelope {
             ValueEnvelope::Raw(bytes) => bytes,
             ValueEnvelope::Plan(plan) => {
-                self.reconstructor
+                let start = Instant::now();
+                let result = self
+                    .reconstructor
                     .reconstruct_with_limit(&plan, self.max_reconstruct_bytes)
-                    .await?
+                    .await;
+                self.counters.add_reconstruction_duration(start.elapsed());
+                result?
             }
         };
         Ok(Some(PiLsmKeyValue { key: kv.key, value }))
@@ -848,6 +970,23 @@ impl PiLsmMetrics {
         }
     }
 
+    fn observe_counters(&mut self, counters: &OperationCounters) {
+        self.raw_bytes_converted_total = counters.load(&counters.raw_bytes_converted_total);
+        self.planner_seconds = nanos_to_seconds(counters.load(&counters.planner_nanos));
+        self.reconstruction_seconds =
+            nanos_to_seconds(counters.load(&counters.reconstruction_nanos));
+        self.compaction_filter_errors_total =
+            counters.load(&counters.compaction_filter_errors_total);
+        self.snapshot_protected_entries_total =
+            counters.load(&counters.snapshot_protected_entries_total);
+        self.vacuum_meaning_attempts_total = counters.load(&counters.vacuum_meaning_attempts_total);
+        self.vacuum_meaning_improvements_total =
+            counters.load(&counters.vacuum_meaning_improvements_total);
+        self.reconstruction_cache_bytes = counters.load(&counters.reconstruction_cache_bytes);
+        self.representation_entropy_excuses_total =
+            counters.load(&counters.representation_entropy_excuses_total);
+    }
+
     fn finish(&mut self) {
         self.chunks_per_value = if self.planned_values_total == 0 {
             None
@@ -875,6 +1014,10 @@ impl PiLsmMetrics {
             )
         };
     }
+}
+
+fn nanos_to_seconds(nanos: u64) -> f64 {
+    nanos as f64 / 1_000_000_000.0
 }
 
 fn envelope_hash(bytes: &[u8]) -> [u8; 32] {
@@ -1193,15 +1336,23 @@ mod tests {
         db.put(b"raw", b"abc").await.unwrap();
         db.put(b"plan", b"def").await.unwrap();
         db.plan_key(b"plan", PlanOptions::default()).await.unwrap();
+        db.get(b"plan").await.unwrap();
+        db.vacuum_meaning(b"plan", PlanOptions::default())
+            .await
+            .unwrap();
 
         let metrics = db.metrics().await.unwrap();
         assert_eq!(metrics.raw_values_total, 1);
         assert_eq!(metrics.planned_values_total, 1);
         assert_eq!(metrics.logical_bytes_total, 6);
         assert_eq!(metrics.planned_logical_bytes_total, 3);
+        assert_eq!(metrics.raw_bytes_converted_total, 3);
         assert_eq!(metrics.located_user_bytes_total, 3);
         assert_eq!(metrics.literal_user_bytes_total, 0);
         assert_eq!(metrics.philosophical_user_value_bytes_stored_total, 3);
+        assert!(metrics.planner_seconds >= 0.0);
+        assert!(metrics.reconstruction_seconds >= 0.0);
+        assert_eq!(metrics.vacuum_meaning_attempts_total, 1);
         assert_eq!(metrics.chunks_per_value, Some(metrics.chunks_total as f64));
         assert_eq!(
             metrics.avg_chunk_len_bytes,

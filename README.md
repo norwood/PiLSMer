@@ -113,6 +113,9 @@ compares plain SlateDB values, PiLSMer raw envelopes, compact binary plans,
 ceremonial plans, and post-vacuum plans. `--suite` runs the named workload
 matrix; without it, `--values` and `--size` apply to the selected workload.
 
+`metrics` combines a scan-derived storage snapshot with runtime counters for
+planner, reconstruction, and app-level vacuum activity in the current process.
+
 ## Correctness Contract
 
 All reads and writes must go through the PiLSMer wrapper. Direct SlateDB reads
