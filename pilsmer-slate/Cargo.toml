@@ -1,0 +1,17 @@
+[package]
+name = "pilsmer-slate"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = "1"
+pilsmer-core = { path = "../pilsmer-core" }
+sha2 = "0.10"
+slatedb = "0.13.1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
