@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -16,6 +16,7 @@ use pilsmer_slate::{
 };
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::ObjectStore;
+use slatedb::Db;
 
 #[derive(Parser, Debug)]
 #[command(name = "pilsmer")]
@@ -77,6 +78,13 @@ enum Command {
         strict_envelopes: bool,
         #[arg(long)]
         ignore_snapshot_representation_safety: bool,
+    },
+    Bench {
+        path: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        values: usize,
+        #[arg(long, default_value_t = 1024)]
+        size: usize,
     },
 }
 
@@ -222,6 +230,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Command::Bench { path, values, size } => {
+            run_bench(&path, values, size, &plan_options, stream_kind).await?;
+        }
     }
 
     Ok(())
@@ -251,6 +262,247 @@ fn compact_mode(
     } else {
         Ok(mode.unwrap_or(CliCompactionMode::Normal).into())
     }
+}
+
+async fn run_bench(
+    path: &Path,
+    value_count: usize,
+    value_size: usize,
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<()> {
+    if value_count == 0 {
+        bail!("--values must be at least 1");
+    }
+    if value_size == 0 {
+        bail!("--size must be at least 1");
+    }
+    if path.exists() {
+        bail!("bench path already exists: {}", path.display());
+    }
+
+    let values = generate_values(value_count, value_size).await?;
+    let plain = bench_plain_slate(&path.join("plain-slate"), &values).await?;
+    let raw = bench_pilsmer_raw(
+        &path.join("pilsmer-raw"),
+        &values,
+        plan_options,
+        stream_kind,
+    )
+    .await?;
+    let planned = bench_pilsmer_planned(
+        &path.join("pilsmer-planned"),
+        &values,
+        plan_options,
+        stream_kind,
+    )
+    .await?;
+
+    println!("values: {value_count}");
+    println!("value_size: {value_size}");
+    println!(
+        "workload\tput_ms\tplan_ms\tread_ms\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
+    );
+    print_bench_row(&plain);
+    print_bench_row(&raw);
+    print_bench_row(&planned);
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct BenchResult {
+    workload: &'static str,
+    put_ms: u128,
+    plan_ms: Option<u128>,
+    read_ms: u128,
+    logical_bytes: u64,
+    physical_value_bytes: Option<u64>,
+    chunks: Option<u64>,
+}
+
+impl BenchResult {
+    fn metadata_amp(&self) -> Option<f64> {
+        match (self.physical_value_bytes, self.logical_bytes) {
+            (Some(bytes), logical) if logical > 0 => Some(bytes as f64 / logical as f64),
+            _ => None,
+        }
+    }
+}
+
+async fn generate_values(value_count: usize, value_size: usize) -> Result<Vec<Vec<u8>>> {
+    let stream = Sha256CounterStream::new([1_u8; 32]);
+    let mut values = Vec::with_capacity(value_count);
+    for ix in 0..value_count {
+        let offset = ix
+            .checked_mul(value_size)
+            .context("benchmark value offset overflow")?;
+        values.push(stream.read_at(offset as u64, value_size).await?.to_vec());
+    }
+    Ok(values)
+}
+
+async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResult> {
+    let (object_store, db_path) = open_local_store(path)?;
+    let db = Db::open(db_path, object_store).await?;
+
+    let put_start = Instant::now();
+    for (ix, value) in values.iter().enumerate() {
+        db.put(key_bytes(ix), value.as_slice()).await?;
+    }
+    db.flush().await?;
+    let put_ms = put_start.elapsed().as_millis();
+
+    let read_start = Instant::now();
+    let mut logical_bytes = 0_u64;
+    for ix in 0..values.len() {
+        let Some(value) = db.get(key_bytes(ix)).await? else {
+            bail!("missing plain SlateDB bench key {ix}");
+        };
+        logical_bytes += value.len() as u64;
+    }
+    let read_ms = read_start.elapsed().as_millis();
+    db.close().await?;
+
+    Ok(BenchResult {
+        workload: "plain-slate",
+        put_ms,
+        plan_ms: None,
+        read_ms,
+        logical_bytes,
+        physical_value_bytes: Some(logical_bytes),
+        chunks: None,
+    })
+}
+
+async fn bench_pilsmer_raw(
+    path: &Path,
+    values: &[Vec<u8>],
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<BenchResult> {
+    let db = open_db(path, plan_options, stream_kind).await?;
+
+    let put_start = Instant::now();
+    for (ix, value) in values.iter().enumerate() {
+        db.put(key_bytes(ix), value.as_slice()).await?;
+    }
+    db.flush().await?;
+    let put_ms = put_start.elapsed().as_millis();
+
+    let read_start = Instant::now();
+    let mut logical_bytes = 0_u64;
+    let mut physical_value_bytes = 0_u64;
+    for ix in 0..values.len() {
+        let key = key_bytes(ix);
+        let Some(value) = db.get(&key).await? else {
+            bail!("missing PiLSMer raw bench key {ix}");
+        };
+        logical_bytes += value.len() as u64;
+        let Some(explain) = db.explain(&key).await? else {
+            bail!("missing PiLSMer raw explain key {ix}");
+        };
+        physical_value_bytes += explain.physical_value_bytes;
+    }
+    let read_ms = read_start.elapsed().as_millis();
+    db.close().await?;
+
+    Ok(BenchResult {
+        workload: "pilsmer-raw",
+        put_ms,
+        plan_ms: None,
+        read_ms,
+        logical_bytes,
+        physical_value_bytes: Some(physical_value_bytes),
+        chunks: None,
+    })
+}
+
+async fn bench_pilsmer_planned(
+    path: &Path,
+    values: &[Vec<u8>],
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<BenchResult> {
+    let db = open_db(path, plan_options, stream_kind).await?;
+
+    let put_start = Instant::now();
+    for (ix, value) in values.iter().enumerate() {
+        db.put(key_bytes(ix), value.as_slice()).await?;
+    }
+    db.flush().await?;
+    let put_ms = put_start.elapsed().as_millis();
+
+    let plan_start = Instant::now();
+    for ix in 0..values.len() {
+        let report = db.plan_key(key_bytes(ix), plan_options.clone()).await?;
+        if !matches!(
+            report.status,
+            RewriteStatus::Rewritten | RewriteStatus::KeptAlreadyPlanned
+        ) {
+            bail!("planning failed for bench key {ix}: {:?}", report.status);
+        }
+    }
+    db.flush().await?;
+    let plan_ms = plan_start.elapsed().as_millis();
+
+    let read_start = Instant::now();
+    let mut logical_bytes = 0_u64;
+    let mut physical_value_bytes = 0_u64;
+    let mut chunks = 0_u64;
+    for ix in 0..values.len() {
+        let key = key_bytes(ix);
+        let Some(value) = db.get(&key).await? else {
+            bail!("missing PiLSMer planned bench key {ix}");
+        };
+        logical_bytes += value.len() as u64;
+        let Some(explain) = db.explain(&key).await? else {
+            bail!("missing PiLSMer planned explain key {ix}");
+        };
+        physical_value_bytes += explain.physical_value_bytes;
+        chunks += explain.chunks;
+    }
+    let read_ms = read_start.elapsed().as_millis();
+    db.close().await?;
+
+    Ok(BenchResult {
+        workload: "pilsmer-planned",
+        put_ms,
+        plan_ms: Some(plan_ms),
+        read_ms,
+        logical_bytes,
+        physical_value_bytes: Some(physical_value_bytes),
+        chunks: Some(chunks),
+    })
+}
+
+fn key_bytes(ix: usize) -> Vec<u8> {
+    format!("k:{ix:08}").into_bytes()
+}
+
+fn print_bench_row(result: &BenchResult) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        result.workload,
+        result.put_ms,
+        optional_u128(result.plan_ms),
+        result.read_ms,
+        result.logical_bytes,
+        optional_u64(result.physical_value_bytes),
+        optional_u64(result.chunks),
+        optional_ratio(result.metadata_amp()),
+    );
+}
+
+fn optional_u128(value: Option<u128>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+fn optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+fn optional_ratio(value: Option<f64>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| format!("{value:.2}x"))
 }
 
 async fn open_db(
