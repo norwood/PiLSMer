@@ -90,6 +90,10 @@ enum Command {
     },
     Bench {
         path: PathBuf,
+        #[arg(long, value_enum, default_value_t = BenchWorkload::Sha256Stream)]
+        workload: BenchWorkload,
+        #[arg(long)]
+        suite: bool,
         #[arg(long, default_value_t = 100)]
         values: usize,
         #[arg(long, default_value_t = 1024)]
@@ -141,6 +145,33 @@ impl From<CliCompactionMode> for CompactionMode {
 enum Humiliation {
     Modest,
     Maximum,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BenchWorkload {
+    Sha256Stream,
+    TinyJson,
+    Json4k,
+    Random64k,
+    Repeated64k,
+    UuidHeavy,
+    AllBytes,
+    TinyPng,
+}
+
+impl BenchWorkload {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha256Stream => "sha256-stream",
+            Self::TinyJson => "tiny-json",
+            Self::Json4k => "json-4k",
+            Self::Random64k => "random-64k",
+            Self::Repeated64k => "repeated-64k",
+            Self::UuidHeavy => "uuid-heavy",
+            Self::AllBytes => "all-bytes",
+            Self::TinyPng => "tiny-png",
+        }
+    }
 }
 
 #[tokio::main]
@@ -290,8 +321,28 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Command::Bench { path, values, size } => {
-            run_bench(&path, values, size, &plan_options, stream_kind).await?;
+        Command::Bench {
+            path,
+            workload,
+            suite,
+            values,
+            size,
+        } => {
+            if suite {
+                run_bench_suite(&path, &plan_options, stream_kind).await?;
+            } else {
+                run_bench(
+                    &path,
+                    BenchCase {
+                        workload,
+                        value_count: values,
+                        value_size: size,
+                    },
+                    &plan_options,
+                    stream_kind,
+                )
+                .await?;
+            }
         }
     }
 
@@ -398,13 +449,87 @@ fn parse_duration(input: &str) -> std::result::Result<Duration, String> {
     }
 }
 
-async fn run_bench(
-    path: &Path,
+#[derive(Clone, Copy, Debug)]
+struct BenchCase {
+    workload: BenchWorkload,
     value_count: usize,
     value_size: usize,
+}
+
+impl BenchCase {
+    fn dir_name(self) -> String {
+        format!(
+            "{}-{}x{}",
+            self.workload.name(),
+            self.value_count,
+            self.value_size
+        )
+    }
+}
+
+async fn run_bench_suite(
+    path: &Path,
     plan_options: &PlanOptions,
     stream_kind: StreamKind,
 ) -> Result<()> {
+    if path.exists() {
+        bail!("bench path already exists: {}", path.display());
+    }
+
+    let cases = [
+        BenchCase {
+            workload: BenchWorkload::TinyJson,
+            value_count: 1_000,
+            value_size: 128,
+        },
+        BenchCase {
+            workload: BenchWorkload::Json4k,
+            value_count: 64,
+            value_size: 4 * 1024,
+        },
+        BenchCase {
+            workload: BenchWorkload::Random64k,
+            value_count: 8,
+            value_size: 64 * 1024,
+        },
+        BenchCase {
+            workload: BenchWorkload::Repeated64k,
+            value_count: 8,
+            value_size: 64 * 1024,
+        },
+        BenchCase {
+            workload: BenchWorkload::TinyPng,
+            value_count: 1,
+            value_size: 68,
+        },
+        BenchCase {
+            workload: BenchWorkload::UuidHeavy,
+            value_count: 1_000,
+            value_size: 36,
+        },
+        BenchCase {
+            workload: BenchWorkload::AllBytes,
+            value_count: 1,
+            value_size: 256,
+        },
+    ];
+
+    for case in cases {
+        println!();
+        run_bench(&path.join(case.dir_name()), case, plan_options, stream_kind).await?;
+    }
+
+    Ok(())
+}
+
+async fn run_bench(
+    path: &Path,
+    case: BenchCase,
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<()> {
+    let value_count = case.value_count;
+    let value_size = case.value_size;
     if value_count == 0 {
         bail!("--values must be at least 1");
     }
@@ -415,7 +540,7 @@ async fn run_bench(
         bail!("bench path already exists: {}", path.display());
     }
 
-    let values = generate_values(value_count, value_size).await?;
+    let values = generate_values(case).await?;
     let compact_options = PlanOptions {
         plan_codec: PlanCodec::CompactBinary,
         ..plan_options.clone()
@@ -470,6 +595,7 @@ async fn run_bench(
 
     println!("values: {value_count}");
     println!("value_size: {value_size}");
+    println!("bench_workload: {}", case.workload.name());
     println!(
         "workload\tput_ms\tplan_ms\tread_ms\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
     );
@@ -501,8 +627,29 @@ impl BenchResult {
     }
 }
 
-async fn generate_values(value_count: usize, value_size: usize) -> Result<Vec<Vec<u8>>> {
-    let stream = Sha256CounterStream::new([1_u8; 32]);
+async fn generate_values(case: BenchCase) -> Result<Vec<Vec<u8>>> {
+    match case.workload {
+        BenchWorkload::Sha256Stream | BenchWorkload::Random64k => {
+            generate_stream_values(case.value_count, case.value_size, [1_u8; 32]).await
+        }
+        BenchWorkload::TinyJson | BenchWorkload::Json4k => {
+            generate_json_values(case.value_count, case.value_size)
+        }
+        BenchWorkload::Repeated64k => generate_repeated_values(case.value_count, case.value_size),
+        BenchWorkload::UuidHeavy => generate_uuid_values(case.value_count, case.value_size).await,
+        BenchWorkload::AllBytes => generate_all_byte_values(case.value_count, case.value_size),
+        BenchWorkload::TinyPng => Ok((0..case.value_count)
+            .map(|_| TINY_PNG_BYTES.to_vec())
+            .collect()),
+    }
+}
+
+async fn generate_stream_values(
+    value_count: usize,
+    value_size: usize,
+    seed: [u8; 32],
+) -> Result<Vec<Vec<u8>>> {
+    let stream = Sha256CounterStream::new(seed);
     let mut values = Vec::with_capacity(value_count);
     for ix in 0..value_count {
         let offset = ix
@@ -512,6 +659,100 @@ async fn generate_values(value_count: usize, value_size: usize) -> Result<Vec<Ve
     }
     Ok(values)
 }
+
+fn generate_json_values(value_count: usize, target_size: usize) -> Result<Vec<Vec<u8>>> {
+    let mut values = Vec::with_capacity(value_count);
+    for ix in 0..value_count {
+        let prefix = format!(
+            r#"{{"id":{ix},"status":"paid","total":{},"note":""#,
+            10_000 + ix
+        );
+        let suffix = r#""}"#;
+        let fill_len = target_size.saturating_sub(prefix.len() + suffix.len());
+        let fill = repeated_ascii(fill_len, b"json-value-field-");
+        values.push(format!("{prefix}{fill}{suffix}").into_bytes());
+    }
+    Ok(values)
+}
+
+fn generate_repeated_values(value_count: usize, value_size: usize) -> Result<Vec<Vec<u8>>> {
+    Ok((0..value_count)
+        .map(|ix| {
+            let pattern = format!("PiLSMer repeated blob {ix:08} stores meaning elsewhere. ");
+            repeated_ascii(value_size, pattern.as_bytes()).into_bytes()
+        })
+        .collect())
+}
+
+async fn generate_uuid_values(value_count: usize, target_size: usize) -> Result<Vec<Vec<u8>>> {
+    let raw = generate_stream_values(value_count.max(1) * 16, 16, [2_u8; 32]).await?;
+    let mut values = Vec::with_capacity(value_count);
+    for ix in 0..value_count {
+        let mut value = uuid_from_bytes(&raw[ix % raw.len()]);
+        let mut next = ix + value_count;
+        while value.len() < target_size {
+            value.push(',');
+            value.push_str(&uuid_from_bytes(&raw[next % raw.len()]));
+            next += value_count;
+        }
+        value.truncate(target_size.max(36));
+        values.push(value.into_bytes());
+    }
+    Ok(values)
+}
+
+fn generate_all_byte_values(value_count: usize, value_size: usize) -> Result<Vec<Vec<u8>>> {
+    Ok((0..value_count)
+        .map(|ix| {
+            (0..value_size)
+                .map(|offset| ((ix + offset) % 256) as u8)
+                .collect()
+        })
+        .collect())
+}
+
+fn repeated_ascii(len: usize, pattern: &[u8]) -> String {
+    if len == 0 {
+        return String::new();
+    }
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        let remaining = len - out.len();
+        let take = remaining.min(pattern.len());
+        out.extend_from_slice(&pattern[..take]);
+    }
+    String::from_utf8(out).expect("benchmark pattern is ASCII")
+}
+
+fn uuid_from_bytes(bytes: &[u8]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+const TINY_PNG_BYTES: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c,
+    0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00,
+    0x03, 0x03, 0x02, 0x00, 0xef, 0xbf, 0xa7, 0xdb, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+];
 
 async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResult> {
     let (object_store, db_path) = open_local_store(path)?;
