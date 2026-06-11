@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use pilsmer_core::{
-    pi_hex_fraction_prefix_stream, ByteStream, PlanOptions, Planner, Reconstructor,
-    Sha256CounterStream, StreamIndex, StreamIndexOptions, StreamRegistry,
+    pi_hex_fraction_prefix_stream, ByteStream, PhilosophicalCompressionRatio, PlanOptions, Planner,
+    Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions, StreamRegistry,
     PI_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
@@ -163,9 +163,18 @@ async fn main() -> Result<()> {
             println!("plan_metadata_bytes: {}", explain.plan_metadata_bytes);
             println!("chunks: {}", explain.chunks);
             println!("longest_natural_run: {}", explain.longest_natural_run);
+            println!("literal_bytes: {}", explain.literal_bytes);
+            match explain.average_chunk_len {
+                Some(len) => println!("average_chunk_len: {len:.2}"),
+                None => println!("average_chunk_len: undefined"),
+            }
             println!(
                 "philosophical_user_value_bytes_stored: {}",
                 explain.philosophical_user_value_bytes_stored
+            );
+            println!(
+                "philosophical_compression_ratio: {}",
+                philosophical_compression_ratio(explain.philosophical_compression_ratio)
             );
             println!("purity: {:?}", explain.purity);
             match explain.metadata_amplification_ratio {
@@ -503,6 +512,15 @@ fn optional_u64(value: Option<u64>) -> String {
 
 fn optional_ratio(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_string(), |value| format!("{value:.2}x"))
+}
+
+fn philosophical_compression_ratio(value: PhilosophicalCompressionRatio) -> String {
+    match value {
+        PhilosophicalCompressionRatio::Finite(value) => format!("{value:.2}x"),
+        PhilosophicalCompressionRatio::Infinite => "infinity".to_string(),
+        PhilosophicalCompressionRatio::Revoked => "revoked".to_string(),
+        PhilosophicalCompressionRatio::Undefined => "undefined".to_string(),
+    }
 }
 
 async fn open_db(

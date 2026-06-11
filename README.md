@@ -38,6 +38,8 @@ cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123
 `plan-key` is the deterministic single-key demo path. It rewrites the latest
 value through the wrapper after checking that the source envelope has not
 changed.
+`explain` reports literal bytes, average chunk length, metadata amplification,
+and philosophical compression status.
 
 The default stream is `sha256-counter:v1` because it can produce arbitrary
 prefix sizes. The pi demo stream is available with `--stream pi-prefix` and a
