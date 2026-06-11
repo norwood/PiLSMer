@@ -286,16 +286,16 @@ impl PiLsmCompactionFilter {
     }
 }
 
-fn plan_score(encoded_envelope: &[u8]) -> (u64, u64) {
+fn plan_score(encoded_envelope: &[u8]) -> u128 {
     match ValueEnvelope::decode(encoded_envelope, &DecodeLimits::default()) {
         Ok(envelope) => {
             let explain = explain_envelope(&envelope, encoded_envelope.len());
             match explain.storage_class {
-                StorageClass::Plan => (encoded_envelope.len() as u64, explain.chunks),
-                StorageClass::Raw => (u64::MAX, u64::MAX),
+                StorageClass::Plan => encoded_envelope.len() as u128 + 16 * explain.chunks as u128,
+                StorageClass::Raw => u128::MAX,
             }
         }
-        Err(_) => (u64::MAX, u64::MAX),
+        Err(_) => u128::MAX,
     }
 }
 
@@ -309,7 +309,8 @@ mod tests {
 
     use bytes::Bytes;
     use pilsmer_core::{
-        ByteStream, PlanCodec, PlanOptions, PrefixByteStream, StreamId, StreamIndex,
+        ByteStream, ChunkRef, ChunkTransform, LogicalHash, LogicalHashKind, PlanCodec, PlanOptions,
+        PlanStream, PrefixByteStream, ReconstructionPlan, StreamId, StreamIndex,
         StreamIndexOptions, StreamRegistry,
     };
 
@@ -609,5 +610,47 @@ mod tests {
         let stats = supplier.stats();
         assert_eq!(stats.raw_values_converted, 1);
         assert_eq!(stats.raw_bytes_converted, 3);
+    }
+
+    #[test]
+    fn vacuum_score_weights_chunk_reduction() {
+        let stream = PlanStream {
+            id: StreamId::Sha256CounterV1 { seed: [0_u8; 32] },
+            fingerprint: [1_u8; 32],
+        };
+        let old_plan = ReconstructionPlan {
+            logical_len: 10,
+            logical_hash: LogicalHash::new(LogicalHashKind::Blake3_128, b"0123456789"),
+            planner_version: 1,
+            plan_codec: PlanCodec::CompactBinary,
+            streams: vec![stream.clone()],
+            chunks: (0_u64..10)
+                .map(|offset| ChunkRef::Located {
+                    stream_ix: 0,
+                    offset,
+                    len: 1,
+                    transform: ChunkTransform::Identity,
+                })
+                .collect(),
+        };
+        let new_plan = ReconstructionPlan {
+            logical_len: 10,
+            logical_hash: old_plan.logical_hash,
+            planner_version: 1,
+            plan_codec: PlanCodec::CeremonialCbor,
+            streams: vec![stream],
+            chunks: vec![ChunkRef::Located {
+                stream_ix: 0,
+                offset: 0,
+                len: 10,
+                transform: ChunkTransform::Identity,
+            }],
+        };
+
+        let old_encoded = ValueEnvelope::Plan(old_plan).encode();
+        let new_encoded = ValueEnvelope::Plan(new_plan).encode();
+
+        assert!(new_encoded.len() > old_encoded.len());
+        assert!(plan_score(&new_encoded) < plan_score(&old_encoded));
     }
 }
