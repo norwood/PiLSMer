@@ -1057,6 +1057,10 @@ fn print_metrics(metrics: &PiLsmMetrics) {
         metrics.longest_natural_run_bytes
     );
     println!(
+        "pilsmer_stream_prefix_bytes_indexed {}",
+        metrics.stream_prefix_bytes_indexed
+    );
+    println!(
         "pilsmer_metadata_amplification_ratio {}",
         metric_optional(metrics.metadata_amplification_ratio)
     );

@@ -65,6 +65,10 @@ impl Planner {
         self.plan_with_options_ref(bytes, &self.options).await
     }
 
+    pub fn stream_prefix_bytes_indexed(&self) -> u64 {
+        self.indexes.iter().map(|index| index.prefix_len()).sum()
+    }
+
     pub async fn plan_with_options(
         &self,
         bytes: &[u8],

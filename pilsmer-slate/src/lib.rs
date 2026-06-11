@@ -152,6 +152,7 @@ pub struct PiLsmDb {
     reconstructor: Reconstructor,
     decode_limits: DecodeLimits,
     max_reconstruct_bytes: u64,
+    stream_prefix_bytes_indexed: u64,
     locks: Arc<KeyLocks>,
     counters: Arc<OperationCounters>,
 }
@@ -365,6 +366,7 @@ pub struct PiLsmMetrics {
     pub chunks_per_value: Option<f64>,
     pub avg_chunk_len_bytes: Option<f64>,
     pub longest_natural_run_bytes: u32,
+    pub stream_prefix_bytes_indexed: u64,
     pub metadata_amplification_ratio: Option<f64>,
     pub philosophical_compression_ratio: PhilosophicalCompressionRatio,
     pub compaction_filter_errors_total: u64,
@@ -397,6 +399,7 @@ impl Default for PiLsmMetrics {
             chunks_per_value: None,
             avg_chunk_len_bytes: None,
             longest_natural_run_bytes: 0,
+            stream_prefix_bytes_indexed: 0,
             metadata_amplification_ratio: None,
             philosophical_compression_ratio: PhilosophicalCompressionRatio::Undefined,
             compaction_filter_errors_total: 0,
@@ -444,12 +447,14 @@ impl PiLsmDb {
 
     pub fn from_db(inner: Db, opts: PiLsmOptions) -> Self {
         let reconstructor = Reconstructor::new(opts.stream_registry);
+        let stream_prefix_bytes_indexed = opts.planner.stream_prefix_bytes_indexed();
         Self {
             inner,
             planner: opts.planner,
             reconstructor,
             decode_limits: opts.decode_limits,
             max_reconstruct_bytes: opts.max_reconstruct_bytes,
+            stream_prefix_bytes_indexed,
             locks: Arc::new(KeyLocks::default()),
             counters: Arc::new(OperationCounters::default()),
         }
@@ -598,6 +603,7 @@ impl PiLsmDb {
         while let Some(kv) = values.next().await? {
             metrics.observe(&kv.explain);
         }
+        metrics.stream_prefix_bytes_indexed = self.stream_prefix_bytes_indexed;
         metrics.observe_counters(&self.counters);
         metrics.finish();
         Ok(metrics)
@@ -1350,6 +1356,7 @@ mod tests {
         assert_eq!(metrics.located_user_bytes_total, 3);
         assert_eq!(metrics.literal_user_bytes_total, 0);
         assert_eq!(metrics.philosophical_user_value_bytes_stored_total, 3);
+        assert_eq!(metrics.stream_prefix_bytes_indexed, 6);
         assert!(metrics.planner_seconds >= 0.0);
         assert!(metrics.reconstruction_seconds >= 0.0);
         assert_eq!(metrics.vacuum_meaning_attempts_total, 1);
