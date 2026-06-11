@@ -8,8 +8,9 @@ pub use compaction_filter::{
     CompactionMode, PiLsmCompactionFilterStats, PiLsmCompactionFilterSupplier,
 };
 use pilsmer_core::{
-    explain_envelope, DecodeLimits, ExplainValue, PiLsmError, PlanOptions, Planner, Reconstructor,
-    Result as CoreResult, StreamRegistry, ValueEnvelope,
+    explain_envelope, DecodeLimits, ExplainValue, PhilosophicalCompressionRatio, PiLsmError,
+    PlanOptions, Planner, Purity, Reconstructor, Result as CoreResult, StorageClass,
+    StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
 use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
@@ -222,6 +223,53 @@ pub struct PiLsmExplainKeyValue {
     pub explain: ExplainValue,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PiLsmMetrics {
+    pub raw_values_total: u64,
+    pub planned_values_total: u64,
+    pub logical_bytes_total: u64,
+    pub planned_logical_bytes_total: u64,
+    pub raw_envelope_bytes_total: u64,
+    pub plan_envelope_bytes_total: u64,
+    pub plan_metadata_bytes_total: u64,
+    pub located_user_bytes_total: u64,
+    pub literal_user_bytes_total: u64,
+    pub physical_value_bytes_total: u64,
+    pub philosophical_user_value_bytes_stored_total: u64,
+    pub chunks_total: u64,
+    pub chunks_per_value: Option<f64>,
+    pub avg_chunk_len_bytes: Option<f64>,
+    pub longest_natural_run_bytes: u32,
+    pub metadata_amplification_ratio: Option<f64>,
+    pub philosophical_compression_ratio: PhilosophicalCompressionRatio,
+    pub philosophical_purity_violations_total: u64,
+}
+
+impl Default for PiLsmMetrics {
+    fn default() -> Self {
+        Self {
+            raw_values_total: 0,
+            planned_values_total: 0,
+            logical_bytes_total: 0,
+            planned_logical_bytes_total: 0,
+            raw_envelope_bytes_total: 0,
+            plan_envelope_bytes_total: 0,
+            plan_metadata_bytes_total: 0,
+            located_user_bytes_total: 0,
+            literal_user_bytes_total: 0,
+            physical_value_bytes_total: 0,
+            philosophical_user_value_bytes_stored_total: 0,
+            chunks_total: 0,
+            chunks_per_value: None,
+            avg_chunk_len_bytes: None,
+            longest_natural_run_bytes: 0,
+            metadata_amplification_ratio: None,
+            philosophical_compression_ratio: PhilosophicalCompressionRatio::Undefined,
+            philosophical_purity_violations_total: 0,
+        }
+    }
+}
+
 impl PiLsmDb {
     pub async fn open<P>(
         path: P,
@@ -350,6 +398,16 @@ impl PiLsmDb {
             inner: self.inner.scan(range).await?,
             decode_limits: self.decode_limits.clone(),
         })
+    }
+
+    pub async fn metrics(&self) -> Result<PiLsmMetrics> {
+        let mut metrics = PiLsmMetrics::new();
+        let mut values = self.scan_explain::<Vec<u8>, _>(Vec::<u8>::new()..).await?;
+        while let Some(kv) = values.next().await? {
+            metrics.observe(&kv.explain);
+        }
+        metrics.finish();
+        Ok(metrics)
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -601,6 +659,76 @@ impl PlanReport {
     }
 }
 
+impl PiLsmMetrics {
+    fn new() -> Self {
+        Self {
+            philosophical_compression_ratio: PhilosophicalCompressionRatio::Undefined,
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, explain: &ExplainValue) {
+        self.logical_bytes_total += explain.logical_user_bytes;
+        self.physical_value_bytes_total += explain.physical_value_bytes;
+
+        match explain.storage_class {
+            StorageClass::Raw => {
+                self.raw_values_total += 1;
+                self.raw_envelope_bytes_total += explain.physical_value_bytes;
+                self.philosophical_user_value_bytes_stored_total += explain.logical_user_bytes;
+            }
+            StorageClass::Plan => {
+                self.planned_values_total += 1;
+                self.planned_logical_bytes_total += explain.logical_user_bytes;
+                self.plan_envelope_bytes_total += explain.physical_value_bytes;
+                self.plan_metadata_bytes_total += explain.plan_metadata_bytes;
+                self.located_user_bytes_total += explain
+                    .logical_user_bytes
+                    .saturating_sub(explain.literal_bytes);
+                self.literal_user_bytes_total += explain.literal_bytes;
+                self.philosophical_user_value_bytes_stored_total +=
+                    explain.philosophical_user_value_bytes_stored;
+                self.chunks_total += explain.chunks;
+                self.longest_natural_run_bytes = self
+                    .longest_natural_run_bytes
+                    .max(explain.longest_natural_run);
+
+                if explain.purity == Purity::Contaminated {
+                    self.philosophical_purity_violations_total += 1;
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.chunks_per_value = if self.planned_values_total == 0 {
+            None
+        } else {
+            Some(self.chunks_total as f64 / self.planned_values_total as f64)
+        };
+        self.avg_chunk_len_bytes = if self.chunks_total == 0 {
+            None
+        } else {
+            Some(self.planned_logical_bytes_total as f64 / self.chunks_total as f64)
+        };
+        self.metadata_amplification_ratio = if self.planned_logical_bytes_total == 0 {
+            None
+        } else {
+            Some(self.plan_envelope_bytes_total as f64 / self.planned_logical_bytes_total as f64)
+        };
+        self.philosophical_compression_ratio = if self.logical_bytes_total == 0 {
+            PhilosophicalCompressionRatio::Undefined
+        } else if self.philosophical_user_value_bytes_stored_total == 0 {
+            PhilosophicalCompressionRatio::Infinite
+        } else {
+            PhilosophicalCompressionRatio::Finite(
+                self.logical_bytes_total as f64
+                    / self.philosophical_user_value_bytes_stored_total as f64,
+            )
+        };
+    }
+}
+
 fn envelope_hash(bytes: &[u8]) -> [u8; 32] {
     let hash = Sha256::digest(bytes);
     let mut out = [0_u8; 32];
@@ -812,6 +940,32 @@ mod tests {
             plan.chunks.last(),
             Some(pilsmer_core::ChunkRef::Literal { bytes }) if bytes.as_ref() == b"z"
         ));
+    }
+
+    #[tokio::test]
+    async fn metrics_snapshot_reports_raw_and_planned_values() {
+        let db = demo_db(b"abcdef").await;
+        db.put(b"raw", b"abc").await.unwrap();
+        db.put(b"plan", b"def").await.unwrap();
+        db.plan_key(b"plan", PlanOptions::default()).await.unwrap();
+
+        let metrics = db.metrics().await.unwrap();
+        assert_eq!(metrics.raw_values_total, 1);
+        assert_eq!(metrics.planned_values_total, 1);
+        assert_eq!(metrics.logical_bytes_total, 6);
+        assert_eq!(metrics.planned_logical_bytes_total, 3);
+        assert_eq!(metrics.located_user_bytes_total, 3);
+        assert_eq!(metrics.literal_user_bytes_total, 0);
+        assert_eq!(metrics.philosophical_user_value_bytes_stored_total, 3);
+        assert_eq!(metrics.chunks_per_value, Some(metrics.chunks_total as f64));
+        assert_eq!(
+            metrics.avg_chunk_len_bytes,
+            Some(3.0 / metrics.chunks_total as f64)
+        );
+        assert!(metrics.plan_metadata_bytes_total > 0);
+        assert!(metrics.raw_envelope_bytes_total > 0);
+        assert!(metrics.physical_value_bytes_total > metrics.raw_envelope_bytes_total);
+        assert_eq!(metrics.philosophical_purity_violations_total, 0);
     }
 
     #[test]

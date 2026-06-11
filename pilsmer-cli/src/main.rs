@@ -12,7 +12,7 @@ use pilsmer_core::{
 };
 use pilsmer_slate::{
     run_compactor_with_options, CompactionMode, PiLsmCompactionFilterSupplier,
-    PiLsmCompactorOptions, PiLsmDb, PiLsmOptions, RewriteStatus,
+    PiLsmCompactorOptions, PiLsmDb, PiLsmMetrics, PiLsmOptions, RewriteStatus,
 };
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::ObjectStore;
@@ -65,6 +65,9 @@ enum Command {
         all: bool,
         #[arg(long, value_parser = parse_duration)]
         budget: Option<Duration>,
+    },
+    Metrics {
+        path: PathBuf,
     },
     Compact {
         path: PathBuf,
@@ -236,6 +239,12 @@ async fn main() -> Result<()> {
                 (false, None) => bail!("vacuum-meaning requires a key or --all"),
             }
             db.flush().await?;
+            db.close().await?;
+        }
+        Command::Metrics { path } => {
+            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let metrics = db.metrics().await?;
+            print_metrics(&metrics);
             db.close().await?;
         }
         Command::Compact {
@@ -628,6 +637,88 @@ fn optional_u64(value: Option<u64>) -> String {
 
 fn optional_ratio(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_string(), |value| format!("{value:.2}x"))
+}
+
+fn print_metrics(metrics: &PiLsmMetrics) {
+    println!("pilsmer_raw_values_total {}", metrics.raw_values_total);
+    println!(
+        "pilsmer_planned_values_total {}",
+        metrics.planned_values_total
+    );
+    println!(
+        "pilsmer_logical_bytes_total {}",
+        metrics.logical_bytes_total
+    );
+    println!(
+        "pilsmer_planned_logical_bytes_total {}",
+        metrics.planned_logical_bytes_total
+    );
+    println!(
+        "pilsmer_raw_envelope_bytes_total {}",
+        metrics.raw_envelope_bytes_total
+    );
+    println!(
+        "pilsmer_plan_envelope_bytes_total {}",
+        metrics.plan_envelope_bytes_total
+    );
+    println!(
+        "pilsmer_plan_metadata_bytes_total {}",
+        metrics.plan_metadata_bytes_total
+    );
+    println!(
+        "pilsmer_located_user_bytes_total {}",
+        metrics.located_user_bytes_total
+    );
+    println!(
+        "pilsmer_literal_user_bytes_total {}",
+        metrics.literal_user_bytes_total
+    );
+    println!(
+        "pilsmer_physical_value_bytes_total {}",
+        metrics.physical_value_bytes_total
+    );
+    println!(
+        "pilsmer_philosophical_user_value_bytes_stored_total {}",
+        metrics.philosophical_user_value_bytes_stored_total
+    );
+    println!("pilsmer_chunks_total {}", metrics.chunks_total);
+    println!(
+        "pilsmer_chunks_per_value {}",
+        metric_optional(metrics.chunks_per_value)
+    );
+    println!(
+        "pilsmer_avg_chunk_len_bytes {}",
+        metric_optional(metrics.avg_chunk_len_bytes)
+    );
+    println!(
+        "pilsmer_longest_natural_run_bytes {}",
+        metrics.longest_natural_run_bytes
+    );
+    println!(
+        "pilsmer_metadata_amplification_ratio {}",
+        metric_optional(metrics.metadata_amplification_ratio)
+    );
+    println!(
+        "pilsmer_philosophical_compression_ratio {}",
+        metric_philosophical_ratio(metrics.philosophical_compression_ratio)
+    );
+    println!(
+        "pilsmer_philosophical_purity_violations_total {}",
+        metrics.philosophical_purity_violations_total
+    );
+}
+
+fn metric_optional(value: Option<f64>) -> String {
+    value.map_or_else(|| "undefined".to_string(), |value| format!("{value:.6}"))
+}
+
+fn metric_philosophical_ratio(value: PhilosophicalCompressionRatio) -> String {
+    match value {
+        PhilosophicalCompressionRatio::Finite(value) => format!("{value:.6}"),
+        PhilosophicalCompressionRatio::Infinite => "infinity".to_string(),
+        PhilosophicalCompressionRatio::Revoked => "revoked".to_string(),
+        PhilosophicalCompressionRatio::Undefined => "undefined".to_string(),
+    }
 }
 
 fn philosophical_compression_ratio(value: PhilosophicalCompressionRatio) -> String {
