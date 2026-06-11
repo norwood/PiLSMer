@@ -1,10 +1,12 @@
 # PiLSMer
 
-PiLSMer is a SlateDB-backed, data-free key-value store.
+Transcendental compaction.
 
-It writes your data normally, then uses planning or compaction to replace stored
-values with instructions for finding equivalent byte sequences inside a
-deterministic stream. Reads still work. Everything else gets worse.
+PiLSMer is a data-free key-value store. Pi for storage. Regret for reads.
+
+It writes your data normally, then uses planning or SlateDB compaction to
+replace stored values with instructions for finding equivalent byte sequences
+inside a deterministic stream. Reads still work. Everything else gets worse.
 
 ## Status
 
