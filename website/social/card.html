@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PiLSMer social card</title>
+<style>
+* {
+  box-sizing: border-box;
+}
+body {
+  width: 1200px;
+  height: 630px;
+  margin: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 78% 18%, rgba(245, 196, 0, 0.16), transparent 390px),
+    radial-gradient(circle at 16% 0%, rgba(6, 59, 43, 0.52), transparent 420px),
+    #090a07;
+  color: #f8f3df;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  position: relative;
+}
+.grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.55;
+  background-image:
+    linear-gradient(to right, rgba(248, 243, 223, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(248, 243, 223, 0.035) 1px, transparent 1px);
+  background-size: 88px 88px;
+  mask-image: radial-gradient(ellipse 88% 82% at 58% 22%, #000 28%, transparent 78%);
+}
+.texture {
+  position: absolute;
+  right: -54px;
+  top: -50px;
+  width: 620px;
+  height: 760px;
+  opacity: 0.54;
+  object-fit: cover;
+  filter: saturate(1.08) contrast(1.05);
+  clip-path: polygon(20% 0, 100% 0, 82% 100%, 0 100%);
+}
+.pi {
+  position: absolute;
+  right: 96px;
+  top: 52px;
+  width: 440px;
+  height: 520px;
+  display: grid;
+  place-items: center;
+  color: #f5c400;
+  font-family: Georgia, serif;
+  font-size: 520px;
+  line-height: 1;
+  text-shadow: 0 0 54px rgba(245, 196, 0, 0.28);
+}
+.pi::after {
+  content: "";
+  position: absolute;
+  inset: 30px 20px 40px;
+  border: 1px solid rgba(248, 243, 223, 0.22);
+  border-radius: 50%;
+  filter: blur(2px);
+}
+.brand {
+  position: absolute;
+  left: 64px;
+  top: 56px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(248, 243, 223, 0.24);
+  border-radius: 50%;
+  background: rgba(245, 196, 0, 0.12);
+  color: #f5c400;
+  font-family: Georgia, serif;
+  font-size: 34px;
+}
+.brand-name {
+  font-size: 24px;
+  font-weight: 850;
+}
+h1 {
+  position: absolute;
+  left: 64px;
+  top: 178px;
+  width: 690px;
+  margin: 0;
+  font-size: 76px;
+  line-height: 0.98;
+  letter-spacing: 0;
+  font-weight: 900;
+}
+.sub {
+  position: absolute;
+  left: 64px;
+  top: 372px;
+  width: 590px;
+  color: #b8b09a;
+  font-size: 26px;
+  line-height: 1.38;
+  font-weight: 650;
+}
+.redline {
+  position: absolute;
+  left: 64px;
+  bottom: 64px;
+  width: 220px;
+  height: 3px;
+  background: #d3202a;
+}
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <img class="texture" src="../assets/pilsner-texture.jpg" alt="">
+  <div class="pi">&pi;</div>
+  <div class="brand">
+    <div class="mark">&pi;</div>
+    <div class="brand-name">PiLSMer</div>
+  </div>
+  <h1>Data-free key-value storage.</h1>
+  <div class="sub">Transcendental compaction. Pi for storage. Regret for reads.</div>
+  <div class="redline"></div>
+</body>
+</html>
