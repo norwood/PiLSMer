@@ -66,6 +66,8 @@ enum Command {
     Explain {
         path: PathBuf,
         key: String,
+        #[arg(long)]
+        philosophical: bool,
     },
     PlanKey {
         path: PathBuf,
@@ -109,6 +111,8 @@ enum Command {
         workload: BenchWorkload,
         #[arg(long)]
         suite: bool,
+        #[arg(long)]
+        against_common_sense: bool,
         #[arg(long, default_value_t = 100)]
         values: usize,
         #[arg(long, default_value_t = 1024)]
@@ -166,8 +170,11 @@ enum Humiliation {
 enum BenchWorkload {
     Sha256Stream,
     TinyJson,
+    #[value(name = "json-4k")]
     Json4k,
+    #[value(name = "random-64k")]
     Random64k,
+    #[value(name = "repeated-64k")]
     Repeated64k,
     UuidHeavy,
     AllBytes,
@@ -232,7 +239,11 @@ async fn main() -> Result<()> {
             db.flush().await?;
             db.close().await?;
         }
-        Command::Explain { path, key } => {
+        Command::Explain {
+            path,
+            key,
+            philosophical: _,
+        } => {
             let db = open_db(&path, &plan_options, stream_kind).await?;
             let Some(explain) = db.explain(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
@@ -356,10 +367,11 @@ async fn main() -> Result<()> {
             path,
             workload,
             suite,
+            against_common_sense,
             values,
             size,
         } => {
-            if suite {
+            if suite || against_common_sense {
                 run_bench_suite(&path, &plan_options, stream_kind).await?;
             } else {
                 run_bench(

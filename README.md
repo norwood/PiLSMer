@@ -91,12 +91,12 @@ pilsmer init <db>
 pilsmer put <db> <key> <file>
 pilsmer get <db> <key>
 pilsmer delete <db> <key>
-pilsmer explain <db> <key>
+pilsmer explain <db> <key> [--philosophical]
 pilsmer plan-key <db> <key>
 pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
 pilsmer metrics <db>
 pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
-pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite]
+pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite|--against-common-sense]
 ```
 
 Global planning options:
@@ -115,9 +115,10 @@ rejects it because literal chunks are still user bytes.
 `bench` writes into a new directory and refuses to reuse an existing path. It
 compares plain SlateDB values, PiLSMer raw envelopes, compact binary plans,
 ceremonial plans, and post-vacuum plans. `--suite` runs the named workload
-matrix; without it, `--values` and `--size` apply to the selected workload. Rows
-include aggregate times, flush time, put p50/p95, read p50/p95/p99, and
-object-store GET/PUT counts.
+matrix; `--against-common-sense` is the same suite with a more honest name.
+Without either, `--values` and `--size` apply to the selected workload. Rows
+include aggregate times, flush time, put p50/p95, read p50/p95/p99,
+reconstruction hash failures, and object-store GET/PUT counts.
 
 `metrics` combines a scan-derived storage snapshot with runtime counters for
 planner, reconstruction, and app-level vacuum activity in the current process.
