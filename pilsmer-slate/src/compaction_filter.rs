@@ -309,8 +309,8 @@ mod tests {
 
     use bytes::Bytes;
     use pilsmer_core::{
-        ByteStream, PlanOptions, PrefixByteStream, StreamId, StreamIndex, StreamIndexOptions,
-        StreamRegistry,
+        ByteStream, PlanCodec, PlanOptions, PrefixByteStream, StreamId, StreamIndex,
+        StreamIndexOptions, StreamRegistry,
     };
 
     use super::*;
@@ -320,6 +320,25 @@ mod tests {
         mode: CompactionMode,
         snapshot_safe_filtering: bool,
         allow_literals: bool,
+    ) -> PiLsmCompactionFilter {
+        filter_for_options(
+            prefix,
+            mode,
+            snapshot_safe_filtering,
+            PlanOptions {
+                max_k: 4,
+                allow_literals,
+                ..PlanOptions::default()
+            },
+        )
+        .await
+    }
+
+    async fn filter_for_options(
+        prefix: &'static [u8],
+        mode: CompactionMode,
+        snapshot_safe_filtering: bool,
+        plan_options: PlanOptions,
     ) -> PiLsmCompactionFilter {
         let stream: Arc<dyn ByteStream> = Arc::new(PrefixByteStream::new(
             StreamId::PiHexFractionPrefixV1 {
@@ -343,11 +362,6 @@ mod tests {
             .await
             .unwrap(),
         );
-        let plan_options = PlanOptions {
-            max_k: 4,
-            allow_literals,
-            ..PlanOptions::default()
-        };
         let planner = Planner::new(vec![index], registry.clone(), plan_options.clone());
         let reconstructor = Reconstructor::new(registry);
         let context = CompactionJobContext {
@@ -412,6 +426,60 @@ mod tests {
         let decision = filter.filter(&entry).await.unwrap();
         assert_eq!(decision, CompactionFilterDecision::Keep);
         assert_eq!(filter.stats.plans_kept, 1);
+    }
+
+    #[tokio::test]
+    async fn vacuum_meaning_filter_rewrites_only_when_plan_improves() {
+        let seed_filter = filter_for_options(
+            b"abcdef",
+            CompactionMode::Normal,
+            true,
+            PlanOptions {
+                max_k: 1,
+                allow_literals: true,
+                plan_codec: PlanCodec::CeremonialCbor,
+                ..PlanOptions::default()
+            },
+        )
+        .await;
+        let old_plan = seed_filter
+            .planner
+            .plan(b"abcdef")
+            .await
+            .expect("seed plan should be possible");
+        let old_encoded = ValueEnvelope::Plan(old_plan.clone()).encode();
+
+        let mut filter = filter_for_options(
+            b"abcdef",
+            CompactionMode::VacuumMeaning,
+            true,
+            PlanOptions {
+                max_k: 4,
+                allow_literals: true,
+                plan_codec: PlanCodec::CompactBinary,
+                ..PlanOptions::default()
+            },
+        )
+        .await;
+        let entry = RowEntry {
+            key: Bytes::from_static(b"k"),
+            value: ValueDeletable::Value(old_encoded.clone().into()),
+            seq: 1,
+            create_ts: None,
+            expire_ts: None,
+        };
+
+        let decision = filter.filter(&entry).await.unwrap();
+        let CompactionFilterDecision::Modify(ValueDeletable::Value(new_encoded)) = decision else {
+            panic!("expected improved plan");
+        };
+        assert_eq!(filter.stats.plans_improved, 1);
+        assert!(new_encoded.len() < old_encoded.len());
+
+        let old_explain = explain_envelope(&ValueEnvelope::Plan(old_plan), old_encoded.len());
+        let new_envelope = ValueEnvelope::decode(&new_encoded, &DecodeLimits::default()).unwrap();
+        let new_explain = explain_envelope(&new_envelope, new_encoded.len());
+        assert!(new_explain.chunks < old_explain.chunks);
     }
 
     #[tokio::test]
