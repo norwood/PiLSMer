@@ -362,7 +362,7 @@ impl PiLsmDb {
         Ok(())
     }
 
-    pub async fn plan_key<K>(&self, key: K, _opts: PlanOptions) -> Result<PlanReport>
+    pub async fn plan_key<K>(&self, key: K, opts: PlanOptions) -> Result<PlanReport>
     where
         K: AsRef<[u8]> + Send,
     {
@@ -389,7 +389,7 @@ impl PiLsmDb {
             return Ok(PlanReport::missing());
         };
 
-        let plan = match self.planner.plan(&logical_bytes).await {
+        let plan = match self.planner.plan_with_options(&logical_bytes, opts).await {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
                 return Ok(PlanReport {
@@ -422,24 +422,38 @@ impl PiLsmDb {
         .await
     }
 
-    pub async fn vacuum_meaning<K>(&self, key: K, _opts: PlanOptions) -> Result<PlanReport>
+    pub async fn vacuum_meaning<K>(&self, key: K, opts: PlanOptions) -> Result<PlanReport>
     where
         K: AsRef<[u8]> + Send,
     {
         let key_bytes = key.as_ref().to_vec();
-        let Some((source_hash, envelope, old_encoded_len)) =
+        let Some((source_hash, envelope, old_encoded_len)) = ({
+            let _guard = self.lock_key(&key_bytes).await;
             self.read_current_envelope(&key_bytes).await?
-        else {
+        }) else {
             return Ok(PlanReport::missing());
         };
 
         let ValueEnvelope::Plan(old_plan) = envelope else {
-            return self.plan_key(key_bytes, PlanOptions::default()).await;
+            return self.plan_key(key_bytes, opts).await;
         };
 
         let old_chunk_count = old_plan.chunks.len();
         let logical_bytes = self.reconstructor.reconstruct(&old_plan).await?;
-        let new_plan = self.planner.plan(&logical_bytes).await?;
+        let new_plan = match self.planner.plan_with_options(&logical_bytes, opts).await {
+            Ok(plan) => plan,
+            Err(PiLsmError::PlanningFailed(_)) => {
+                return Ok(PlanReport {
+                    status: RewriteStatus::SkippedPlanningFailed,
+                    source_envelope_hash: Some(source_hash),
+                    old_envelope_bytes: Some(old_encoded_len),
+                    new_envelope_bytes: None,
+                    old_chunk_count: Some(old_chunk_count),
+                    new_chunk_count: None,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
         let new_chunk_count = new_plan.chunks.len();
         let encoded_plan = ValueEnvelope::Plan(new_plan).encode();
         if !plan_improved(
@@ -600,8 +614,12 @@ fn plan_improved(
     new_envelope_bytes: usize,
     new_chunk_count: usize,
 ) -> bool {
-    new_envelope_bytes < old_envelope_bytes
-        || (new_envelope_bytes == old_envelope_bytes && new_chunk_count < old_chunk_count)
+    plan_score(new_envelope_bytes, new_chunk_count)
+        < plan_score(old_envelope_bytes, old_chunk_count)
+}
+
+fn plan_score(envelope_bytes: usize, chunk_count: usize) -> u128 {
+    envelope_bytes as u128 + 16 * chunk_count as u128
 }
 
 #[cfg(test)]
@@ -732,5 +750,73 @@ mod tests {
             StorageClass::Raw
         );
         assert!(explain.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn app_level_rewrite_honors_caller_plan_options() {
+        let db = demo_db(b"abc").await;
+        db.put(b"k", b"az").await.unwrap();
+
+        let report = db.plan_key(b"k", PlanOptions::default()).await.unwrap();
+        assert_eq!(report.status, RewriteStatus::SkippedPlanningFailed);
+        assert!(matches!(
+            db.get_envelope(b"k").await.unwrap().unwrap(),
+            ValueEnvelope::Raw(_)
+        ));
+
+        let report = db
+            .plan_key(
+                b"k",
+                PlanOptions {
+                    max_k: 2,
+                    allow_literals: true,
+                    ..PlanOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.status, RewriteStatus::Rewritten);
+        let ValueEnvelope::Plan(plan) = db.get_envelope(b"k").await.unwrap().unwrap() else {
+            panic!("expected planned envelope");
+        };
+        assert!(matches!(
+            plan.chunks.last(),
+            Some(pilsmer_core::ChunkRef::Literal { bytes }) if bytes.as_ref() == b"z"
+        ));
+    }
+
+    #[tokio::test]
+    async fn vacuum_keeps_existing_plan_when_replan_fails() {
+        let db = demo_db(b"abc").await;
+        db.put(b"k", b"az").await.unwrap();
+        db.plan_key(
+            b"k",
+            PlanOptions {
+                max_k: 2,
+                allow_literals: true,
+                ..PlanOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = db
+            .vacuum_meaning(b"k", PlanOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(report.status, RewriteStatus::SkippedPlanningFailed);
+        let ValueEnvelope::Plan(plan) = db.get_envelope(b"k").await.unwrap().unwrap() else {
+            panic!("expected existing plan to be kept");
+        };
+        assert!(matches!(
+            plan.chunks.last(),
+            Some(pilsmer_core::ChunkRef::Literal { bytes }) if bytes.as_ref() == b"z"
+        ));
+    }
+
+    #[test]
+    fn vacuum_score_accepts_only_weighted_improvements() {
+        assert!(plan_improved(100, 10, 110, 1));
+        assert!(!plan_improved(100, 1, 99, 2));
     }
 }

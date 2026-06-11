@@ -62,6 +62,22 @@ impl Planner {
     }
 
     pub async fn plan(&self, bytes: &[u8]) -> Result<ReconstructionPlan> {
+        self.plan_with_options_ref(bytes, &self.options).await
+    }
+
+    pub async fn plan_with_options(
+        &self,
+        bytes: &[u8],
+        options: PlanOptions,
+    ) -> Result<ReconstructionPlan> {
+        self.plan_with_options_ref(bytes, &options).await
+    }
+
+    async fn plan_with_options_ref(
+        &self,
+        bytes: &[u8],
+        options: &PlanOptions,
+    ) -> Result<ReconstructionPlan> {
         let streams = self
             .indexes
             .iter()
@@ -71,7 +87,7 @@ impl Planner {
             })
             .collect::<Vec<_>>();
 
-        let choices = self.choose_chunks(bytes)?;
+        let choices = self.choose_chunks(bytes, options)?;
         let mut chunks = Vec::with_capacity(choices.len());
         for choice in choices {
             match choice {
@@ -94,9 +110,9 @@ impl Planner {
 
         let plan = ReconstructionPlan {
             logical_len: bytes.len() as u64,
-            logical_hash: LogicalHash::new(self.options.logical_hash_kind, bytes),
+            logical_hash: LogicalHash::new(options.logical_hash_kind, bytes),
             planner_version: PLANNER_VERSION,
-            plan_codec: self.options.plan_codec,
+            plan_codec: options.plan_codec,
             streams,
             chunks,
         };
@@ -111,7 +127,7 @@ impl Planner {
         Ok(plan)
     }
 
-    fn choose_chunks(&self, bytes: &[u8]) -> Result<Vec<Choice>> {
+    fn choose_chunks(&self, bytes: &[u8], options: &PlanOptions) -> Result<Vec<Choice>> {
         let n = bytes.len();
         let mut dp: Vec<Option<State>> = vec![None; n + 1];
         dp[n] = Some(State {
@@ -121,7 +137,7 @@ impl Planner {
 
         for i in (0..n).rev() {
             let mut best: Option<State> = None;
-            for candidate in self.candidates_at(bytes, i) {
+            for candidate in self.candidates_at(bytes, i, options) {
                 let next = i + candidate.len();
                 let Some(next_state) = &dp[next] else {
                     continue;
@@ -158,9 +174,9 @@ impl Planner {
         Ok(out)
     }
 
-    fn candidates_at(&self, bytes: &[u8], pos: usize) -> Vec<Choice> {
+    fn candidates_at(&self, bytes: &[u8], pos: usize, options: &PlanOptions) -> Vec<Choice> {
         let remaining = bytes.len() - pos;
-        let max_k = self.options.max_k.min(remaining);
+        let max_k = options.max_k.min(remaining);
         let mut candidates = Vec::new();
 
         for len in 1..=max_k {
@@ -178,7 +194,7 @@ impl Planner {
             }
         }
 
-        if self.options.allow_literals {
+        if options.allow_literals {
             candidates.push(Choice::Literal(bytes[pos]));
         }
 
