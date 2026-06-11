@@ -1590,8 +1590,10 @@ name = "pilsmer-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
+ "futures",
  "pilsmer-core",
  "pilsmer-slate",
  "slatedb",

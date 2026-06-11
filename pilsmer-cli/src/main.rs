@@ -1,10 +1,14 @@
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
+use futures::stream::BoxStream;
 use pilsmer_core::{
     pi_hex_fraction_prefix_stream, ByteStream, PhilosophicalCompressionRatio, PlanCodec,
     PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions,
@@ -16,7 +20,11 @@ use pilsmer_slate::{
     RewriteStatus,
 };
 use slatedb::object_store::local::LocalFileSystem;
-use slatedb::object_store::ObjectStore;
+use slatedb::object_store::path::Path as ObjectStorePath;
+use slatedb::object_store::{
+    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+};
 use slatedb::Db;
 
 #[derive(Parser, Debug)]
@@ -599,7 +607,7 @@ async fn run_bench(
     println!("value_size: {value_size}");
     println!("bench_workload: {}", case.workload.name());
     println!(
-        "workload\tput_ms\tflush_ms\tput_p50_us\tput_p95_us\tplan_ms\tread_ms\tread_p50_us\tread_p95_us\tread_p99_us\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
+        "workload\tput_ms\tflush_ms\tput_p50_us\tput_p95_us\tplan_ms\tread_ms\tread_p50_us\tread_p95_us\tread_p99_us\tobject_store_gets\tobject_store_puts\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
     );
     print_bench_row(&plain);
     print_bench_row(&raw);
@@ -618,6 +626,7 @@ struct BenchResult {
     plan_ms: Option<u128>,
     read_ms: u128,
     read_latency: Option<LatencySummary>,
+    object_store_counts: Option<ObjectStoreCounts>,
     logical_bytes: u64,
     physical_value_bytes: Option<u64>,
     chunks: Option<u64>,
@@ -786,7 +795,7 @@ const TINY_PNG_BYTES: &[u8] = &[
 ];
 
 async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResult> {
-    let (object_store, db_path) = open_local_store(path)?;
+    let (object_store, db_path, object_store_counters) = open_counted_local_store(path)?;
     let db = Db::open(db_path, object_store).await?;
 
     let put_start = Instant::now();
@@ -814,6 +823,7 @@ async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResul
     }
     let read_ms = read_start.elapsed().as_millis();
     db.close().await?;
+    let object_store_counts = object_store_counters.snapshot();
 
     Ok(BenchResult {
         workload: "plain-slate",
@@ -823,6 +833,7 @@ async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResul
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        object_store_counts: Some(object_store_counts),
         logical_bytes,
         physical_value_bytes: Some(logical_bytes),
         chunks: None,
@@ -835,7 +846,7 @@ async fn bench_pilsmer_raw(
     plan_options: &PlanOptions,
     stream_kind: StreamKind,
 ) -> Result<BenchResult> {
-    let db = open_db(path, plan_options, stream_kind).await?;
+    let (db, object_store_counters) = open_counted_db(path, plan_options, stream_kind).await?;
 
     let put_start = Instant::now();
     let mut put_latencies = Vec::with_capacity(values.len());
@@ -868,6 +879,7 @@ async fn bench_pilsmer_raw(
     }
     let read_ms = read_start.elapsed().as_millis();
     db.close().await?;
+    let object_store_counts = object_store_counters.snapshot();
 
     Ok(BenchResult {
         workload: "pilsmer-raw",
@@ -877,6 +889,7 @@ async fn bench_pilsmer_raw(
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        object_store_counts: Some(object_store_counts),
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
         chunks: None,
@@ -890,7 +903,7 @@ async fn bench_pilsmer_planned(
     plan_options: &PlanOptions,
     stream_kind: StreamKind,
 ) -> Result<BenchResult> {
-    let db = open_db(path, plan_options, stream_kind).await?;
+    let (db, object_store_counters) = open_counted_db(path, plan_options, stream_kind).await?;
 
     let put_start = Instant::now();
     let mut put_latencies = Vec::with_capacity(values.len());
@@ -923,6 +936,7 @@ async fn bench_pilsmer_planned(
     result.put_latency = latency_summary(put_latencies);
     result.plan_ms = Some(plan_ms);
     db.close().await?;
+    result.object_store_counts = Some(object_store_counters.snapshot());
     Ok(result)
 }
 
@@ -933,7 +947,9 @@ async fn bench_pilsmer_vacuumed(
     vacuum_options: &PlanOptions,
     stream_kind: StreamKind,
 ) -> Result<BenchResult> {
-    let db = open_db(path, seed_options, stream_kind).await?;
+    let (object_store, db_path, object_store_counters) = open_counted_local_store(path)?;
+    let seed_runtime = build_runtime(seed_options, stream_kind).await?;
+    let db = PiLsmDb::open(db_path.clone(), object_store.clone(), seed_runtime.opts).await?;
 
     let put_start = Instant::now();
     let mut put_latencies = Vec::with_capacity(values.len());
@@ -963,7 +979,8 @@ async fn bench_pilsmer_vacuumed(
     db.flush().await?;
     db.close().await?;
 
-    let db = open_db(path, vacuum_options, stream_kind).await?;
+    let vacuum_runtime = build_runtime(vacuum_options, stream_kind).await?;
+    let db = PiLsmDb::open(db_path, object_store, vacuum_runtime.opts).await?;
     for ix in 0..values.len() {
         let report = db
             .vacuum_meaning(key_bytes(ix), vacuum_options.clone())
@@ -989,6 +1006,7 @@ async fn bench_pilsmer_vacuumed(
     result.put_latency = latency_summary(put_latencies);
     result.plan_ms = Some(rewrite_ms);
     db.close().await?;
+    result.object_store_counts = Some(object_store_counters.snapshot());
     Ok(result)
 }
 
@@ -1026,6 +1044,7 @@ async fn collect_pilsmer_read_result(
         plan_ms: None,
         read_ms,
         read_latency: latency_summary(read_latencies),
+        object_store_counts: None,
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
         chunks: Some(chunks),
@@ -1038,7 +1057,7 @@ fn key_bytes(ix: usize) -> Vec<u8> {
 
 fn print_bench_row(result: &BenchResult) {
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         result.workload,
         result.put_ms,
         optional_u128(result.flush_ms),
@@ -1049,6 +1068,8 @@ fn print_bench_row(result: &BenchResult) {
         optional_latency(result.read_latency, |latency| latency.p50_us),
         optional_latency(result.read_latency, |latency| latency.p95_us),
         optional_latency(result.read_latency, |latency| latency.p99_us),
+        optional_u64(result.object_store_counts.map(|counts| counts.gets)),
+        optional_u64(result.object_store_counts.map(|counts| counts.puts)),
         result.logical_bytes,
         optional_u64(result.physical_value_bytes),
         optional_u64(result.chunks),
@@ -1241,11 +1262,222 @@ async fn open_db(
     Ok(PiLsmDb::open(db_path, object_store, runtime.opts).await?)
 }
 
+async fn open_counted_db(
+    path: &Path,
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<(PiLsmDb, ObjectStoreCounters)> {
+    let (object_store, db_path, counters) = open_counted_local_store(path)?;
+    let runtime = build_runtime(plan_options, stream_kind).await?;
+    Ok((
+        PiLsmDb::open(db_path, object_store, runtime.opts).await?,
+        counters,
+    ))
+}
+
 fn open_local_store(path: &Path) -> Result<(Arc<dyn ObjectStore>, String)> {
     let (root, db_path) = split_db_path(path)?;
     std::fs::create_dir_all(&root)
         .with_context(|| format!("creating object-store root {}", root.display()))?;
     Ok((Arc::new(LocalFileSystem::new_with_prefix(&root)?), db_path))
+}
+
+fn open_counted_local_store(
+    path: &Path,
+) -> Result<(Arc<dyn ObjectStore>, String, ObjectStoreCounters)> {
+    let (object_store, db_path) = open_local_store(path)?;
+    let counters = ObjectStoreCounters::default();
+    Ok((
+        Arc::new(CountingObjectStore {
+            inner: object_store,
+            counters: counters.clone(),
+        }),
+        db_path,
+        counters,
+    ))
+}
+
+#[derive(Clone, Debug, Default)]
+struct ObjectStoreCounters {
+    inner: Arc<ObjectStoreCounterState>,
+}
+
+#[derive(Debug, Default)]
+struct ObjectStoreCounterState {
+    gets: AtomicU64,
+    puts: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ObjectStoreCounts {
+    gets: u64,
+    puts: u64,
+}
+
+impl ObjectStoreCounters {
+    fn add_get(&self) {
+        self.inner.gets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_put(&self) {
+        self.inner.puts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ObjectStoreCounts {
+        ObjectStoreCounts {
+            gets: self.inner.gets.load(Ordering::Relaxed),
+            puts: self.inner.puts.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CountingObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    counters: ObjectStoreCounters,
+}
+
+impl std::fmt::Display for CountingObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CountingObjectStore({})", self.inner)
+    }
+}
+
+impl std::fmt::Debug for CountingObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountingObjectStore").finish()
+    }
+}
+
+#[async_trait]
+impl ObjectStore for CountingObjectStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectStorePath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> slatedb::object_store::Result<PutResult> {
+        self.counters.add_put();
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectStorePath,
+        opts: PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn MultipartUpload>> {
+        self.counters.add_put();
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(CountingMultipartUpload {
+            inner,
+            counters: self.counters.clone(),
+        }))
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectStorePath,
+        options: GetOptions,
+    ) -> slatedb::object_store::Result<GetResult> {
+        self.counters.add_get();
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn get_range(
+        &self,
+        location: &ObjectStorePath,
+        range: Range<u64>,
+    ) -> slatedb::object_store::Result<bytes::Bytes> {
+        self.counters.add_get();
+        self.inner.get_range(location, range).await
+    }
+
+    async fn get_ranges(
+        &self,
+        location: &ObjectStorePath,
+        ranges: &[Range<u64>],
+    ) -> slatedb::object_store::Result<Vec<bytes::Bytes>> {
+        self.counters.add_get();
+        self.inner.get_ranges(location, ranges).await
+    }
+
+    async fn head(&self, location: &ObjectStorePath) -> slatedb::object_store::Result<ObjectMeta> {
+        self.counters.add_get();
+        self.inner.head(location).await
+    }
+
+    async fn delete(&self, location: &ObjectStorePath) -> slatedb::object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectStorePath>,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        self.counters.add_get();
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&ObjectStorePath>,
+        offset: &ObjectStorePath,
+    ) -> BoxStream<'static, slatedb::object_store::Result<ObjectMeta>> {
+        self.counters.add_get();
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectStorePath>,
+    ) -> slatedb::object_store::Result<ListResult> {
+        self.counters.add_get();
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(
+        &self,
+        from: &ObjectStorePath,
+        to: &ObjectStorePath,
+    ) -> slatedb::object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(
+        &self,
+        from: &ObjectStorePath,
+        to: &ObjectStorePath,
+    ) -> slatedb::object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+struct CountingMultipartUpload {
+    inner: Box<dyn MultipartUpload>,
+    counters: ObjectStoreCounters,
+}
+
+impl std::fmt::Debug for CountingMultipartUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountingMultipartUpload").finish()
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for CountingMultipartUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        self.counters.add_put();
+        self.inner.put_part(data)
+    }
+
+    async fn complete(&mut self) -> slatedb::object_store::Result<PutResult> {
+        self.counters.add_put();
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> slatedb::object_store::Result<()> {
+        self.inner.abort().await
+    }
 }
 
 struct Runtime {
