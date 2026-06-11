@@ -12,127 +12,109 @@ body {
   height: 630px;
   margin: 0;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 78% 18%, rgba(245, 196, 0, 0.16), transparent 390px),
-    radial-gradient(circle at 16% 0%, rgba(6, 59, 43, 0.52), transparent 420px),
-    #090a07;
-  color: #f8f3df;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   position: relative;
+  background:
+    radial-gradient(circle at 78% 12%, rgba(245, 196, 0, 0.22), transparent 360px),
+    linear-gradient(112deg, #05110b 0%, #080b07 48%, #121506 100%);
+  color: #fff5cf;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-.grid {
+.beer-field {
   position: absolute;
-  inset: 0;
-  opacity: 0.55;
-  background-image:
-    linear-gradient(to right, rgba(248, 243, 223, 0.035) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(248, 243, 223, 0.035) 1px, transparent 1px);
-  background-size: 88px 88px;
-  mask-image: radial-gradient(ellipse 88% 82% at 58% 22%, #000 28%, transparent 78%);
+  inset: 0 0 0 auto;
+  width: 410px;
+  background:
+    linear-gradient(180deg, rgba(255, 245, 207, 0.22), transparent 42%),
+    url("../assets/pilsner-texture.jpg") center / cover,
+    #f5c400;
+  clip-path: polygon(18% 0, 100% 0, 100% 100%, 0 100%);
 }
-.texture {
+.red-rule {
   position: absolute;
-  right: -54px;
-  top: -50px;
-  width: 620px;
-  height: 760px;
-  opacity: 0.54;
-  object-fit: cover;
-  filter: saturate(1.08) contrast(1.05);
-  clip-path: polygon(20% 0, 100% 0, 82% 100%, 0 100%);
+  left: 64px;
+  bottom: 64px;
+  width: 260px;
+  height: 4px;
+  background: #d3202a;
 }
-.pi {
+.watermark {
   position: absolute;
-  right: 96px;
-  top: 52px;
-  width: 440px;
-  height: 520px;
-  display: grid;
-  place-items: center;
-  color: #f5c400;
-  font-family: Georgia, serif;
-  font-size: 520px;
-  line-height: 1;
-  text-shadow: 0 0 54px rgba(245, 196, 0, 0.28);
-}
-.pi::after {
-  content: "";
-  position: absolute;
-  inset: 30px 20px 40px;
-  border: 1px solid rgba(248, 243, 223, 0.22);
-  border-radius: 50%;
-  filter: blur(2px);
+  right: 112px;
+  bottom: -110px;
+  color: rgba(245, 196, 0, 0.58);
+  font: 520px/0.8 Georgia, serif;
 }
 .brand {
   position: absolute;
   left: 64px;
-  top: 56px;
+  top: 58px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
 }
 .mark {
-  width: 48px;
-  height: 48px;
+  width: 54px;
+  height: 54px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(248, 243, 223, 0.24);
+  border: 1px solid rgba(255, 245, 207, 0.32);
   border-radius: 50%;
-  background: rgba(245, 196, 0, 0.12);
+  background: rgba(245, 196, 0, 0.14);
   color: #f5c400;
-  font-family: Georgia, serif;
-  font-size: 34px;
-  line-height: 1;
+  font: 38px/1 Georgia, serif;
 }
-.pi-glyph {
+.mark span {
   display: block;
   transform: translateY(-3px);
 }
 .brand-name {
-  font-size: 24px;
-  font-weight: 850;
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 900;
 }
 h1 {
   position: absolute;
   left: 64px;
-  top: 178px;
-  width: 690px;
+  top: 176px;
+  width: 700px;
   margin: 0;
-  font-size: 76px;
-  line-height: 0.98;
+  font-size: 86px;
+  line-height: 0.9;
   letter-spacing: 0;
-  font-weight: 900;
+  font-weight: 950;
 }
 .sub {
   position: absolute;
-  left: 64px;
-  top: 372px;
+  left: 68px;
+  top: 382px;
   width: 590px;
-  color: #b8b09a;
-  font-size: 26px;
-  line-height: 1.38;
-  font-weight: 650;
+  color: #b9ad87;
+  font-size: 28px;
+  line-height: 1.32;
+  font-weight: 680;
 }
-.redline {
+.digits {
   position: absolute;
-  left: 64px;
-  bottom: 64px;
-  width: 220px;
-  height: 3px;
-  background: #d3202a;
+  right: -108px;
+  top: 54px;
+  width: 280px;
+  color: rgba(23, 17, 6, 0.5);
+  font: 800 18px/1.28 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  word-break: break-all;
+  transform: rotate(90deg);
 }
 </style>
 </head>
 <body>
-  <div class="grid"></div>
-  <img class="texture" src="../assets/pilsner-texture.jpg" alt="">
-  <div class="pi">&pi;</div>
+  <div class="beer-field"></div>
+  <div class="watermark">&pi;</div>
+  <div class="digits">3141592653589793238462643383279502884197169399375105820974944592307816406286208998628034825</div>
   <div class="brand">
-    <div class="mark"><span class="pi-glyph">&pi;</span></div>
+    <div class="mark"><span>&pi;</span></div>
     <div class="brand-name">PiLSMer</div>
   </div>
   <h1>Data-free key-value storage.</h1>
   <div class="sub">Transcendental compaction. Pi for storage. Regret for reads.</div>
-  <div class="redline"></div>
+  <div class="red-rule"></div>
 </body>
 </html>

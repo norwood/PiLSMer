@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PiLSMer - data-free key-value storage</title>
-<meta name="description" content="PiLSMer is a SlateDB-backed, data-free key-value store. Your data is not stored. It is merely located.">
+<meta name="description" content="PiLSMer is a SlateDB-backed, data-free key-value store. Transcendental compaction. Pi for storage. Regret for reads.">
 <meta property="og:title" content="PiLSMer - data-free key-value storage">
 <meta property="og:description" content="Transcendental compaction. Pi for storage. Regret for reads.">
 <meta property="og:type" content="website">
@@ -16,26 +16,21 @@
 <link rel="preload" as="image" href="assets/pilsner-texture.jpg">
 <style>
 :root {
-  --bg: #090a07;
-  --bg-raise: #11130d;
-  --panel: rgba(248, 243, 223, 0.045);
-  --panel-strong: rgba(248, 243, 223, 0.075);
-  --text: #f8f3df;
-  --text-dim: #b8b09a;
-  --text-faint: #756f5f;
+  color-scheme: dark;
+  --black: #080b07;
+  --green: #062e20;
+  --green-bright: #0f5b3a;
+  --cream: #fff5cf;
+  --cream-dim: #b9ad87;
+  --muted: #746b52;
   --gold: #f5c400;
-  --gold-deep: #a87d00;
-  --gold-soft: rgba(245, 196, 0, 0.15);
-  --green: #063b2b;
-  --green-2: #0b5a38;
-  --green-soft: rgba(6, 59, 43, 0.35);
+  --gold-soft: rgba(245, 196, 0, 0.18);
   --red: #d3202a;
-  --line: rgba(248, 243, 223, 0.11);
-  --line-bright: rgba(248, 243, 223, 0.24);
-  --shadow: rgba(0, 0, 0, 0.54);
+  --line: rgba(255, 245, 207, 0.16);
+  --line-soft: rgba(255, 245, 207, 0.08);
+  --panel: rgba(255, 245, 207, 0.055);
   --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  --r: 8px;
 }
 * {
   box-sizing: border-box;
@@ -46,27 +41,24 @@ html {
 body {
   margin: 0;
   background:
-    radial-gradient(circle at 78% 8%, rgba(245, 196, 0, 0.13), transparent 32rem),
-    radial-gradient(circle at 12% 4%, rgba(6, 59, 43, 0.38), transparent 28rem),
-    var(--bg);
-  color: var(--text);
+    radial-gradient(circle at 82% 12%, rgba(245, 196, 0, 0.16), transparent 30rem),
+    linear-gradient(112deg, #05110b 0%, var(--black) 45%, #101305 100%);
+  color: var(--cream);
   font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 body::before {
-  content: "";
+  content: "&pi;";
   position: fixed;
-  inset: 0;
+  right: -0.18em;
+  top: -0.2em;
   z-index: -2;
+  color: rgba(245, 196, 0, 0.055);
+  font-family: Georgia, serif;
+  font-size: min(84vw, 860px);
+  line-height: 0.8;
   pointer-events: none;
-  background-image:
-    linear-gradient(to right, rgba(248, 243, 223, 0.024) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(248, 243, 223, 0.024) 1px, transparent 1px);
-  background-size: 88px 88px;
-  mask-image: radial-gradient(ellipse 90% 68% at 50% 0%, #000 28%, transparent 76%);
 }
 body::after {
   content: "";
@@ -74,1118 +66,752 @@ body::after {
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  opacity: 0.22;
-  background-image:
-    radial-gradient(circle at 20% 30%, rgba(248, 243, 223, 0.12) 0 1px, transparent 2px),
-    radial-gradient(circle at 80% 10%, rgba(245, 196, 0, 0.15) 0 1px, transparent 2px);
-  background-size: 140px 140px, 210px 210px;
+  background:
+    linear-gradient(90deg, rgba(211, 32, 42, 0.16) 0 3px, transparent 3px 100%) 10% 0 / 180px 100%,
+    radial-gradient(circle at 28% 22%, rgba(255, 245, 207, 0.08) 0 1px, transparent 2px) 0 0 / 120px 120px;
+  opacity: 0.5;
 }
 ::selection {
   background: var(--gold);
-  color: var(--bg);
+  color: var(--black);
 }
 a {
   color: inherit;
   text-decoration: none;
 }
-code {
-  font-family: var(--mono);
-}
-.wrap {
-  width: min(1160px, calc(100% - 40px));
-  margin: 0 auto;
-}
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  border-bottom: 1px solid transparent;
-  transition: background 180ms ease, border-color 180ms ease;
-}
-.topbar.is-scrolled {
-  background: rgba(9, 10, 7, 0.94);
-  border-color: var(--line);
-  backdrop-filter: blur(14px);
-}
-.nav {
-  min-height: 68px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-  color: var(--text);
-}
-.brand-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line-bright);
-  border-radius: 50%;
-  background:
-    linear-gradient(145deg, rgba(245, 196, 0, 0.18), rgba(6, 59, 43, 0.3)),
-    rgba(248, 243, 223, 0.04);
-  box-shadow: 0 0 28px rgba(245, 196, 0, 0.16);
-  color: var(--gold);
-  font-family: Georgia, serif;
-  font-size: 25px;
-  line-height: 1;
-}
-.pi-glyph {
-  display: block;
-  transform: translateY(-2px);
-}
-.brand-text {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-.brand-name {
-  font-size: 15px;
-  font-weight: 800;
-  line-height: 1.1;
-}
-.brand-sub {
-  color: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 10px;
-  line-height: 1.3;
-  text-transform: uppercase;
-}
-.nav-links {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.nav-links a {
-  color: var(--text-dim);
-  font-size: 14px;
-  font-weight: 600;
-  padding: 8px 11px;
-  border-radius: var(--r);
-  transition: color 160ms ease, background 160ms ease;
-}
-.nav-links a:hover {
-  color: var(--text);
-  background: var(--panel);
-}
-.nav-links .source {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-.nav-links .cta {
-  margin-left: 6px;
-  color: #0b1208;
-  background: var(--gold);
-  border: 1px solid rgba(255, 226, 92, 0.55);
-  box-shadow: 0 8px 30px rgba(245, 196, 0, 0.18);
-}
-.nav-links .cta:hover {
-  color: #050804;
-  background: #ffd722;
-}
-.hero {
-  position: relative;
-  overflow: clip;
-  border-bottom: 1px solid var(--line);
-}
-.hero .wrap {
-  position: relative;
-  min-height: 560px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
-  align-items: center;
-  gap: 54px;
-  padding: 54px 0 58px;
-}
-.hero-copy {
-  position: relative;
-  z-index: 2;
-  max-width: 700px;
-}
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 18px;
-  color: var(--gold);
-  font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-.eyebrow::before {
-  content: "";
-  width: 34px;
-  height: 1px;
-  background: var(--red);
-}
+p,
 h1,
 h2,
 h3,
-p {
+pre {
   margin: 0;
 }
-h1 {
-  max-width: 9ch;
-  font-size: 76px;
-  line-height: 0.96;
-  letter-spacing: 0;
+.page-shell {
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto;
+}
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px 0 18px;
+}
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.mini-coaster {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 245, 207, 0.28);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 36% 30%, rgba(255, 245, 207, 0.16), transparent 18px),
+    rgba(245, 196, 0, 0.13);
+  color: var(--gold);
+  font: 30px/1 Georgia, serif;
+  box-shadow: inset 0 0 0 1px rgba(245, 196, 0, 0.1);
+}
+.mini-coaster span {
+  display: block;
+  transform: translateY(-2px);
+}
+.brand-word {
+  display: grid;
+  gap: 1px;
+}
+.brand-word strong {
+  font-size: 18px;
+  line-height: 1;
   font-weight: 900;
 }
-.hero-line {
-  margin-top: 24px;
-  max-width: 680px;
-  color: var(--text);
-  font-size: 24px;
-  line-height: 1.35;
-  font-weight: 750;
+.brand-word small {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
-.lede {
-  margin-top: 18px;
-  max-width: 650px;
-  color: var(--text-dim);
+.site-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--cream-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.site-links a {
+  padding: 8px 10px;
+  border-bottom: 1px solid transparent;
+}
+.site-links a:hover {
+  color: var(--cream);
+  border-color: var(--red);
+}
+.opening {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 430px);
+  gap: 64px;
+  align-items: center;
+  min-height: 660px;
+  padding: 30px 0 76px;
+}
+.headline {
+  max-width: 760px;
+}
+.tagline {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.tagline::after {
+  content: "";
+  width: 64px;
+  height: 2px;
+  background: var(--red);
+}
+h1 {
+  max-width: 8ch;
+  font-size: clamp(64px, 12vw, 142px);
+  line-height: 0.82;
+  letter-spacing: 0;
+  font-weight: 950;
+}
+.plain-claim {
+  max-width: 680px;
+  margin-top: 34px;
+  color: var(--cream);
+  font-size: clamp(22px, 3.2vw, 36px);
+  line-height: 1.14;
+  font-weight: 820;
+}
+.intro-copy {
+  max-width: 660px;
+  margin-top: 22px;
+  color: var(--cream-dim);
   font-size: 18px;
   line-height: 1.72;
 }
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-  margin-top: 36px;
-}
-.cmd {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
   gap: 12px;
-  border: 1px solid var(--line-bright);
-  border-radius: var(--r);
-  background: rgba(0, 0, 0, 0.34);
-  box-shadow: inset 0 1px 0 rgba(248, 243, 223, 0.06), 0 20px 60px var(--shadow);
-  padding: 13px 14px;
-  font-family: var(--mono);
-  font-size: 14px;
-  color: var(--text);
+  margin-top: 34px;
 }
-.cmd .prompt {
-  color: var(--gold);
-  user-select: none;
-}
-.cmd code {
-  overflow-wrap: anywhere;
-}
-.copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: rgba(248, 243, 223, 0.045);
-  color: var(--text-dim);
-  cursor: pointer;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
-}
-.copy-btn:hover {
-  color: var(--text);
-  border-color: var(--line-bright);
-  background: var(--panel);
-}
-.copy-btn svg {
-  width: 14px;
-  height: 14px;
-}
-.ghost {
+.pill-link {
   display: inline-flex;
   align-items: center;
   min-height: 46px;
-  padding: 0 17px;
+  padding: 0 16px;
   border: 1px solid var(--line);
-  border-radius: var(--r);
-  color: var(--text-dim);
+  border-radius: 999px;
+  color: var(--cream);
   font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
-}
-.ghost:hover {
-  color: var(--text);
-  border-color: var(--line-bright);
-  background: var(--panel);
-}
-.hero-visual {
-  position: relative;
-  z-index: 1;
-  min-height: 470px;
-  isolation: isolate;
-}
-.pi-art {
-  position: absolute;
-  inset: -36px -70px -20px -80px;
-  width: calc(100% + 150px);
-  height: calc(100% + 56px);
-  filter: drop-shadow(0 0 52px rgba(245, 196, 0, 0.22));
-  transform: translate3d(var(--px, 0), var(--py, 0), 0);
-  transition: transform 900ms ease;
-}
-.hero-visual::before {
-  content: "";
-  position: absolute;
-  inset: 42px 24px 22px 64px;
-  z-index: -1;
-  border: 1px solid rgba(245, 196, 0, 0.18);
-  border-radius: 50%;
-  background:
-    radial-gradient(circle, rgba(245, 196, 0, 0.12), transparent 60%),
-    radial-gradient(circle at 56% 35%, rgba(248, 243, 223, 0.16), transparent 12rem);
-  filter: blur(18px);
-}
-.hero-visual::after {
-  content: "";
-  position: absolute;
-  inset: 8% 8% 0 20%;
-  z-index: -2;
-  border-left: 2px solid rgba(211, 32, 42, 0.52);
-  border-right: 2px solid rgba(245, 196, 0, 0.18);
-  transform: rotate(8deg);
-}
-.stats {
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(248, 243, 223, 0.02), rgba(6, 59, 43, 0.12));
-}
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-.stat {
-  min-height: 164px;
-  padding: 34px 26px 30px;
-  border-left: 1px solid var(--line);
-}
-.stat:first-child {
-  border-left: 0;
-  padding-left: 0;
-}
-.stat-value {
-  font-size: 38px;
-  line-height: 1;
-  font-weight: 900;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.stat-value .small {
-  font-size: 19px;
-  color: var(--gold);
-}
-.stat-label {
-  margin-top: 13px;
-  color: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.6;
-  text-transform: uppercase;
-}
-.section-intro a,
-.body-link {
-  color: var(--text);
-  border-bottom: 1px solid var(--line-bright);
-}
-section {
-  border-bottom: 1px solid var(--line);
-}
-section .wrap {
-  padding-top: 88px;
-  padding-bottom: 96px;
-}
-.section-kicker {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  margin-bottom: 18px;
-  font-family: var(--mono);
-  text-transform: uppercase;
-}
-.section-kicker .idx {
-  color: var(--gold);
   font-size: 12px;
   font-weight: 800;
-}
-.section-kicker .label {
-  color: var(--text-faint);
-  font-size: 12px;
-}
-h2 {
-  max-width: 780px;
-  font-size: 48px;
-  line-height: 1.08;
-  letter-spacing: 0;
-  font-weight: 900;
-}
-.section-intro {
-  margin-top: 18px;
-  max-width: 700px;
-  color: var(--text-dim);
-  font-size: 18px;
-  line-height: 1.7;
-}
-.terminal {
-  margin-top: 42px;
-  overflow: hidden;
-  border: 1px solid var(--line-bright);
-  border-radius: var(--r);
-  background: #0b0d08;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(248, 243, 223, 0.06);
-}
-.terminal-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  padding: 0 15px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(248, 243, 223, 0.03);
-}
-.terminal-bar i {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: rgba(248, 243, 223, 0.15);
-}
-.terminal-bar span {
-  margin-left: 8px;
-  color: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 11px;
   text-transform: uppercase;
 }
-pre {
-  margin: 0;
-  overflow-x: auto;
-  padding: 22px 24px 26px;
-  color: #e8dfbd;
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.8;
-  white-space: pre;
+.pill-link.primary {
+  border-color: rgba(245, 196, 0, 0.5);
+  background: var(--gold);
+  color: #171106;
 }
-.ps1 {
-  color: var(--gold);
+.pill-link:hover {
+  border-color: rgba(255, 245, 207, 0.34);
+  background: rgba(255, 245, 207, 0.05);
 }
-.muted {
-  color: var(--text-faint);
+.pill-link.primary:hover {
+  background: #ffd927;
 }
-.ok {
-  color: #8fe080;
-}
-.warn {
-  color: var(--gold);
-}
-.demo-grid {
-  display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
-  gap: 18px;
-  align-items: start;
-}
-.panel {
-  margin-top: 42px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--panel);
-  overflow: hidden;
-}
-.panel h3 {
-  padding: 18px 20px;
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 13px;
-  text-transform: uppercase;
-}
-.output-list {
-  display: grid;
-  gap: 1px;
-  background: var(--line);
-}
-.output-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 18px;
-  padding: 13px 18px;
-  background: rgba(9, 10, 7, 0.76);
-  font-family: var(--mono);
-  font-size: 13px;
-}
-.output-row span:first-child {
-  color: var(--text-dim);
-}
-.output-row span:last-child {
-  color: var(--text);
-  text-align: right;
-}
-.flow {
-  margin-top: 48px;
-}
-.flow svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-.flow-node {
-  fill: rgba(248, 243, 223, 0.045);
-  stroke: rgba(248, 243, 223, 0.18);
-}
-.flow-node.gold {
-  fill: rgba(245, 196, 0, 0.12);
-  stroke: rgba(245, 196, 0, 0.42);
-}
-.flow-wire {
-  stroke: rgba(248, 243, 223, 0.28);
-  stroke-width: 2;
-  fill: none;
-}
-.flow-label {
-  fill: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 13px;
-  text-transform: uppercase;
-}
-.flow-small {
-  fill: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 10px;
-}
-.proof-grid,
-.feature-grid {
-  display: grid;
-  margin-top: 46px;
-  gap: 14px;
-}
-.proof-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-.feature-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-.proof,
-.feature {
+.label-panel {
   position: relative;
-  min-height: 188px;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background:
-    linear-gradient(180deg, rgba(248, 243, 223, 0.055), rgba(248, 243, 223, 0.028)),
-    rgba(0, 0, 0, 0.12);
-  padding: 22px;
+  min-height: 520px;
+  border: 1px solid rgba(255, 245, 207, 0.18);
+  border-radius: 6px;
   overflow: hidden;
-  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+  background:
+    linear-gradient(90deg, rgba(6, 46, 32, 0.94) 0 57%, rgba(245, 196, 0, 0.92) 57% 100%),
+    var(--green);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.42);
 }
-.proof::before,
-.feature::before {
+.label-panel::before {
   content: "";
   position: absolute;
   inset: 0;
-  pointer-events: none;
-  opacity: 0;
-  background: radial-gradient(360px circle at var(--mx, 50%) var(--my, 50%), rgba(245, 196, 0, 0.1), transparent 62%);
-  transition: opacity 180ms ease;
+  background-image: url("assets/pilsner-texture.jpg");
+  background-size: cover;
+  background-position: center;
+  mix-blend-mode: screen;
+  opacity: 0.24;
 }
-.proof:hover,
-.feature:hover {
-  border-color: var(--line-bright);
-  transform: translateY(-2px);
-  background: var(--panel-strong);
+.label-panel::after {
+  content: "";
+  position: absolute;
+  left: 44px;
+  right: 44px;
+  bottom: 44px;
+  height: 4px;
+  background: var(--red);
 }
-.proof:hover::before,
-.feature:hover::before {
-  opacity: 1;
-}
-.proof h3,
-.feature h3 {
-  position: relative;
-  z-index: 1;
-  font-size: 17px;
-  line-height: 1.35;
-}
-.proof p,
-.feature p {
-  position: relative;
-  z-index: 1;
-  margin-top: 11px;
-  color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1.6;
-}
-.proof .src,
-.feature .num {
-  position: relative;
-  z-index: 1;
-  margin-top: auto;
-  padding-top: 18px;
-  color: var(--gold);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-.metrics-grid {
-  display: grid;
-  grid-template-columns: 0.95fr 1.05fr;
-  gap: 20px;
-  align-items: start;
-}
-.metric-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-.metric-table th,
-.metric-table td {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-  vertical-align: top;
-}
-.metric-table th {
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-.metric-table td:last-child {
-  color: var(--text);
-  text-align: right;
-}
-.metric-table tr:last-child td {
-  border-bottom: 0;
-}
-.closer {
-  position: relative;
-  overflow: clip;
-  text-align: center;
-}
-.closer .wrap {
-  display: flex;
-  min-height: 470px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding-top: 76px;
-  padding-bottom: 82px;
-}
-.closer-mark {
-  width: 96px;
-  height: 96px;
+.big-coaster {
+  position: absolute;
+  left: 42px;
+  top: 54px;
+  width: 188px;
+  height: 188px;
   display: grid;
   place-items: center;
-  margin-bottom: 30px;
-  border: 1px solid var(--line-bright);
+  border: 1px solid rgba(255, 245, 207, 0.32);
   border-radius: 50%;
   background:
-    linear-gradient(145deg, rgba(245, 196, 0, 0.22), rgba(6, 59, 43, 0.38)),
-    rgba(248, 243, 223, 0.04);
+    radial-gradient(circle at 38% 28%, rgba(255, 245, 207, 0.16), transparent 54px),
+    rgba(6, 46, 32, 0.72);
   color: var(--gold);
-  font-family: Georgia, serif;
-  font-size: 68px;
-  line-height: 1;
-  box-shadow: 0 0 70px rgba(245, 196, 0, 0.18);
+  font: 132px/1 Georgia, serif;
+  box-shadow: 0 0 70px rgba(245, 196, 0, 0.22);
 }
-.closer h2 {
+.big-coaster span {
+  display: block;
+  transform: translateY(-8px);
+}
+.label-title {
+  position: absolute;
+  left: 44px;
+  bottom: 88px;
+  max-width: 270px;
+  color: var(--cream);
+}
+.label-title strong {
+  display: block;
+  font-size: 42px;
+  line-height: 0.94;
+  font-weight: 950;
+}
+.label-title span {
+  display: block;
+  margin-top: 14px;
+  color: var(--cream-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  text-transform: uppercase;
+}
+.digit-ribbon {
+  position: absolute;
+  right: -84px;
+  top: 42px;
+  width: 260px;
+  color: rgba(23, 17, 6, 0.56);
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.28;
+  word-break: break-all;
+  transform: rotate(90deg);
+}
+.content-band {
+  border-top: 1px solid var(--line-soft);
+  padding: 86px 0;
+}
+.content-band.tint {
+  background: rgba(6, 46, 32, 0.18);
+}
+.section-head {
+  display: grid;
+  grid-template-columns: 0.72fr 1fr;
+  gap: 44px;
+  align-items: start;
+  margin-bottom: 42px;
+}
+.section-head h2 {
+  font-size: clamp(36px, 5vw, 72px);
+  line-height: 0.95;
+  letter-spacing: 0;
+  font-weight: 950;
+}
+.section-head p {
+  max-width: 640px;
+  color: var(--cream-dim);
+  font-size: 18px;
+  line-height: 1.72;
+}
+.tap-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+.tap-item {
+  min-height: 230px;
+  padding: 26px;
+  background:
+    linear-gradient(180deg, rgba(255, 245, 207, 0.05), rgba(255, 245, 207, 0.025)),
+    #0a1009;
+}
+.tap-item b {
+  display: block;
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.tap-item h3 {
+  margin-top: 44px;
+  font-size: 24px;
+  line-height: 1.08;
+}
+.tap-item p {
+  margin-top: 14px;
+  color: var(--cream-dim);
+  line-height: 1.62;
+}
+.receipt {
+  border: 1px solid rgba(255, 245, 207, 0.2);
+  background:
+    linear-gradient(180deg, rgba(255, 245, 207, 0.08), rgba(255, 245, 207, 0.035)),
+    #0d130b;
+  box-shadow: 18px 18px 0 rgba(211, 32, 42, 0.18);
+}
+.receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+  color: var(--cream-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.copy-demo {
+  border: 1px solid rgba(255, 245, 207, 0.18);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--cream);
+  cursor: pointer;
+  font: 800 11px/1 var(--mono);
+  padding: 8px 12px;
+  text-transform: uppercase;
+}
+.copy-demo:hover {
+  border-color: rgba(245, 196, 0, 0.55);
+  color: var(--gold);
+}
+pre {
+  overflow-x: auto;
+  padding: 24px;
+  color: #efe4bb;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.78;
+  white-space: pre;
+}
+.prompt {
+  color: var(--gold);
+}
+.readback {
+  color: #9be47f;
+}
+.process-rail {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 42px;
+  align-items: start;
+}
+.rail-pi {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  place-items: center;
+  width: 190px;
+  height: 190px;
+  border: 1px solid rgba(245, 196, 0, 0.36);
+  border-radius: 50%;
+  background: rgba(245, 196, 0, 0.1);
+  color: var(--gold);
+  font: 136px/1 Georgia, serif;
+}
+.rail-pi span {
+  display: block;
+  transform: translateY(-8px);
+}
+.process-list {
+  display: grid;
+  gap: 18px;
+}
+.process-step {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 24px;
+  padding: 24px 0 24px 24px;
+  border-left: 3px solid var(--red);
+}
+.process-step strong {
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.process-step h3 {
+  font-size: 28px;
+  line-height: 1.05;
+}
+.process-step p {
+  margin-top: 10px;
+  max-width: 720px;
+  color: var(--cream-dim);
+  line-height: 1.68;
+}
+.source-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.source-link {
+  display: grid;
+  gap: 10px;
+  min-height: 148px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.source-link:hover {
+  border-color: rgba(245, 196, 0, 0.42);
+}
+.source-link code {
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.source-link span {
+  color: var(--cream-dim);
+  line-height: 1.6;
+}
+.final-pour {
+  padding: 100px 0 82px;
+  text-align: center;
+}
+.final-pour .mini-coaster {
+  width: 86px;
+  height: 86px;
+  margin: 0 auto 28px;
+  font-size: 62px;
+}
+.final-pour h2 {
+  max-width: 840px;
   margin: 0 auto;
-  max-width: 760px;
+  font-size: clamp(40px, 6vw, 82px);
+  line-height: 0.95;
+  font-weight: 950;
 }
-.closer .section-intro {
-  margin-left: auto;
-  margin-right: auto;
+.final-pour p {
+  margin-top: 26px;
+  color: var(--cream-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-transform: uppercase;
 }
-footer {
-  color: var(--text-faint);
+.final-pour a {
+  border-bottom: 1px solid rgba(255, 245, 207, 0.28);
+}
+.site-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 28px 0 38px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
   font-family: var(--mono);
   font-size: 11px;
 }
-footer .wrap {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 26px 0 34px;
+.site-foot a {
+  color: var(--cream-dim);
 }
-footer a {
-  color: var(--text-dim);
-}
-.js .rv {
-  opacity: 0;
-  transform: translateY(14px);
-  transition: opacity 580ms ease, transform 580ms ease;
-}
-.js .rv.in {
-  opacity: 1;
-  transform: none;
-}
-@media (max-width: 980px) {
-  .hero .wrap {
+@media (max-width: 920px) {
+  .opening,
+  .section-head,
+  .process-rail {
     grid-template-columns: 1fr;
-    gap: 24px;
+  }
+  .opening {
+    gap: 36px;
     min-height: 0;
-    padding-top: 56px;
   }
-  .hero-visual {
-    min-height: 360px;
-    order: -1;
+  .label-panel {
+    min-height: 420px;
   }
-  .pi-art {
-    inset: -60px 0 -30px 0;
-    width: 100%;
-  }
-  .stats-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .stat:nth-child(odd) {
-    border-left: 0;
-    padding-left: 0;
-  }
-  .stat:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--line);
-  }
-  .demo-grid,
-  .metrics-grid {
+  .tap-list,
+  .source-board {
     grid-template-columns: 1fr;
   }
-  .proof-grid,
-  .feature-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .rail-pi {
+    position: relative;
+    top: auto;
+    width: 118px;
+    height: 118px;
+    font-size: 86px;
+  }
+  .process-step {
+    grid-template-columns: 1fr;
   }
 }
-@media (max-width: 720px) {
-  .wrap {
-    width: min(100% - 28px, 1160px);
+@media (max-width: 620px) {
+  .page-shell {
+    width: min(100% - 28px, 1180px);
   }
-  .nav {
-    min-height: 62px;
+  .masthead {
+    align-items: flex-start;
+    flex-direction: column;
   }
-  .brand-sub,
-  .nav-links a:not(.source):not(.cta) {
-    display: none;
+  .site-links {
+    flex-wrap: wrap;
   }
-  .nav-links .cta {
-    margin-left: 0;
+  .opening {
+    padding-top: 18px;
+    padding-bottom: 54px;
   }
-  h1 {
-    font-size: 48px;
+  .label-panel {
+    min-height: 360px;
   }
-  h2 {
+  .big-coaster {
+    left: 28px;
+    top: 34px;
+    width: 132px;
+    height: 132px;
+    font-size: 94px;
+  }
+  .label-title {
+    left: 28px;
+    bottom: 74px;
+  }
+  .label-title strong {
     font-size: 34px;
   }
-  .hero-line {
-    font-size: 18px;
+  .digit-ribbon {
+    right: -112px;
   }
-  .lede,
-  .section-intro {
-    font-size: 15px;
+  .content-band {
+    padding: 64px 0;
   }
-  .hero .wrap {
-    padding: 20px 0 34px;
-  }
-  .hero-visual {
-    min-height: 188px;
-  }
-  .hero-actions {
-    margin-top: 24px;
-  }
-  .cmd {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    width: 100%;
-  }
-  .copy-btn {
-    margin-left: auto;
-  }
-  .stats-grid,
-  .proof-grid,
-  .feature-grid {
-    grid-template-columns: 1fr;
-  }
-  .stat {
-    border-left: 0;
-    border-bottom: 1px solid var(--line);
-    padding: 26px 0;
+  .tap-item {
     min-height: 0;
   }
-  .stat:last-child {
-    border-bottom: 0;
+  .tap-item h3 {
+    margin-top: 28px;
   }
-  section .wrap {
-    padding-top: 64px;
-    padding-bottom: 72px;
+  .receipt {
+    box-shadow: 8px 8px 0 rgba(211, 32, 42, 0.2);
   }
-  .flow {
-    overflow-x: auto;
+  pre {
+    font-size: 12px;
+    padding: 18px;
   }
-  .flow svg {
-    min-width: 680px;
-  }
-  footer .wrap {
+  .site-foot {
     flex-direction: column;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-  *,
-  *::before,
-  *::after {
-    animation-duration: 1ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 1ms !important;
-  }
-  .js .rv {
-    opacity: 1;
-    transform: none;
-  }
-  .pi-art {
-    transform: none !important;
-  }
-}
 </style>
-<script>document.documentElement.classList.add("js");</script>
 </head>
 <body>
-<header class="topbar" id="topbar">
-  <div class="wrap nav">
-    <a class="brand" href="#" aria-label="PiLSMer home">
-      <span class="brand-mark" aria-hidden="true"><span class="pi-glyph">&pi;</span></span>
-      <span class="brand-text">
-        <span class="brand-name">PiLSMer</span>
-        <span class="brand-sub">data-free KV</span>
-      </span>
-    </a>
-    <nav class="nav-links" aria-label="Primary navigation">
-      <a href="#demo">Demo</a>
-      <a href="#mechanism">Mechanism</a>
-      <a href="#proof">Proof</a>
-      <a class="source" href="https://github.com/norwood/PiLSMer">GitHub</a>
-      <a class="cta" href="#demo">Demo</a>
-    </nav>
-  </div>
+<header class="page-shell masthead">
+  <a class="brand-lockup" href="#" aria-label="PiLSMer home">
+    <span class="mini-coaster" aria-hidden="true"><span>&pi;</span></span>
+    <span class="brand-word">
+      <strong>PiLSMer</strong>
+      <small>data-free KV</small>
+    </span>
+  </a>
+  <nav class="site-links" aria-label="Primary navigation">
+    <a href="#how">How</a>
+    <a href="#demo">Demo</a>
+    <a href="#source">Source</a>
+    <a href="https://github.com/norwood/PiLSMer">GitHub</a>
+  </nav>
 </header>
 
 <main>
-  <section class="hero">
-    <div class="wrap">
-      <div class="hero-copy">
-        <div class="eyebrow rv">Transcendental compaction</div>
-        <h1>PiLSMer</h1>
-        <p class="hero-line rv">A data-free key-value store. Pi for storage. Regret for reads.</p>
-        <p class="lede rv">PiLSMer writes your data normally, then uses planning or compaction to replace stored values with instructions for finding equivalent byte sequences inside a deterministic stream. Reads still work. Everything else gets worse.</p>
-        <div class="hero-actions rv">
-          <a class="ghost" href="#demo">See the demo</a>
-          <a class="ghost" href="https://github.com/norwood/PiLSMer">Read the source</a>
-        </div>
+  <section class="page-shell opening">
+    <div class="headline">
+      <div class="tagline">Transcendental compaction</div>
+      <h1>PiLSMer</h1>
+      <p class="plain-claim">A data-free key-value store. Pi for storage. Regret for reads.</p>
+      <p class="intro-copy">PiLSMer writes your data normally, then uses planning or SlateDB compaction to replace stored values with instructions for finding equivalent byte sequences inside a deterministic stream. Reads still work. Everything else gets worse.</p>
+      <div class="hero-actions">
+        <a class="pill-link primary" href="#demo">Run the demo</a>
+        <a class="pill-link" href="https://github.com/norwood/PiLSMer">Read the source</a>
       </div>
-      <div class="hero-visual rv" aria-hidden="true">
-        <svg class="pi-art" viewBox="0 0 760 760" role="img">
-          <defs>
-            <clipPath id="piClip">
-              <text x="380" y="632" text-anchor="middle" font-size="720" font-weight="900" font-family="Georgia, serif">&pi;</text>
-            </clipPath>
-            <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#fff2b8"/>
-              <stop offset="0.4" stop-color="#f5c400"/>
-              <stop offset="1" stop-color="#0b5a38"/>
-            </linearGradient>
-          </defs>
-          <image href="assets/pilsner-texture.jpg" x="40" y="30" width="690" height="700" preserveAspectRatio="xMidYMid slice" clip-path="url(#piClip)" opacity="0.86"/>
-          <g clip-path="url(#piClip)" opacity="0.34">
-            <text x="66" y="180" class="flow-small">3.14159265358979323846264338327950288419716939937510</text>
-            <text x="18" y="248" class="flow-small">58209749445923078164062862089986280348253421170679</text>
-            <text x="86" y="316" class="flow-small">82148086513282306647093844609550582231725359408128</text>
-            <text x="34" y="384" class="flow-small">48111745028410270193852110555964462294895493038196</text>
-            <text x="80" y="452" class="flow-small">44288109756659334461284756482337867831652712019091</text>
-            <text x="22" y="520" class="flow-small">45648566923460348610454326648213393607260249141273</text>
-            <text x="94" y="588" class="flow-small">72458700660631558817488152092096282925409171536436</text>
-          </g>
-          <text x="380" y="632" text-anchor="middle" font-size="720" font-weight="900" font-family="Georgia, serif" fill="none" stroke="url(#rim)" stroke-width="2.6" opacity="0.68">&pi;</text>
-        </svg>
+    </div>
+
+    <div class="label-panel" aria-hidden="true">
+      <div class="big-coaster"><span>&pi;</span></div>
+      <div class="digit-ribbon">3141592653589793238462643383279502884197169399375105820974944592307816406286208998628034825</div>
+      <div class="label-title">
+        <strong>stored nowhere</strong>
+        <span>deterministic stream lager<br>with metadata aftertaste</span>
       </div>
     </div>
   </section>
 
-  <div class="stats" aria-label="Project stats">
-    <div class="wrap">
-      <div class="stats-grid">
-        <div class="stat rv"><div class="stat-value">0</div><div class="stat-label">philosophical user bytes stored after pure planning</div></div>
-        <div class="stat rv"><div class="stat-value">&infin;</div><div class="stat-label">philosophical compression ratio, when purity survives</div></div>
-        <div class="stat rv"><div class="stat-value">4</div><div class="stat-label">deterministic stream families in the demo build</div></div>
-        <div class="stat rv"><div class="stat-value">2<span class="small"> codecs</span></div><div class="stat-label">compact binary and ceremonial CBOR regret</div></div>
+  <section class="content-band tint" id="how">
+    <div class="page-shell">
+      <div class="section-head">
+        <h2>What changes on disk?</h2>
+        <p>The wrapper can turn a raw value into a plan: stream identity, offsets, chunk lengths, and hashes. That plan is enough to reconstruct the original bytes while making the storage engine look worse at its job.</p>
+      </div>
+      <div class="tap-list">
+        <article class="tap-item">
+          <b>write</b>
+          <h3>Start boring.</h3>
+          <p>A normal put writes a typed raw envelope through SlateDB, so direct engine reads do not pretend the bytes are anything else.</p>
+        </article>
+        <article class="tap-item">
+          <b>plan</b>
+          <h3>Find the bytes elsewhere.</h3>
+          <p>The planner searches deterministic stream prefixes and replaces the value with a reconstruction recipe when it can.</p>
+        </article>
+        <article class="tap-item">
+          <b>read</b>
+          <h3>Return the same bytes.</h3>
+          <p>Gets reconstruct the logical value from the plan, verify the hash, and hand back the original payload.</p>
+        </article>
       </div>
     </div>
-  </div>
+  </section>
 
-  <section id="demo">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">01</span><span class="label">Demo</span></div>
-      <h2 class="rv">The value survives. The storage does not.</h2>
-      <p class="section-intro rv">The canonical demo writes a JSON invoice, explains the raw envelope, rewrites it into a plan, explains the damage, and reads the original bytes back.</p>
-      <div class="demo-grid">
-        <div class="terminal rv">
-          <div class="terminal-bar"><i></i><i></i><i></i><span>pilsmer-demo - zsh</span></div>
-          <pre><span class="ps1">$</span> cargo run -q --bin pilsmer -- init /tmp/pilsmer-demo/db
-<span class="ps1">$</span> printf '{"total":49.99,"status":"paid"}' &gt; /tmp/pilsmer-demo/invoice.json
-<span class="ps1">$</span> cargo run -q --bin pilsmer -- put /tmp/pilsmer-demo/db invoice:123 /tmp/pilsmer-demo/invoice.json
-<span class="ps1">$</span> cargo run -q --bin pilsmer -- explain /tmp/pilsmer-demo/db invoice:123
-storage_class: Raw
-logical_user_bytes: 31
-physical_value_bytes: 56
-
-<span class="ps1">$</span> cargo run -q --bin pilsmer -- plan-key /tmp/pilsmer-demo/db invoice:123
+  <section class="content-band" id="demo">
+    <div class="page-shell">
+      <div class="section-head">
+        <h2>One tiny humiliation loop.</h2>
+        <p>The useful demo path writes a JSON invoice, asks PiLSMer to plan it, and then reads the exact value back. The page stays on the mechanism and leaves performance claims for later data.</p>
+      </div>
+      <div class="receipt">
+        <div class="receipt-head">
+          <span>pilsmer receipt</span>
+          <button class="copy-demo" type="button" data-copy="cargo run -q --bin pilsmer -- init /tmp/pilsmer-demo/db
+printf '{&quot;total&quot;:49.99,&quot;status&quot;:&quot;paid&quot;}' > /tmp/pilsmer-demo/invoice.json
+cargo run -q --bin pilsmer -- put /tmp/pilsmer-demo/db invoice:123 /tmp/pilsmer-demo/invoice.json
+cargo run -q --bin pilsmer -- plan-key /tmp/pilsmer-demo/db invoice:123
+cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123">Copy</button>
+        </div>
+        <pre><span class="prompt">$</span> cargo run -q --bin pilsmer -- init /tmp/pilsmer-demo/db
+<span class="prompt">$</span> printf '{"total":49.99,"status":"paid"}' &gt; /tmp/pilsmer-demo/invoice.json
+<span class="prompt">$</span> cargo run -q --bin pilsmer -- put /tmp/pilsmer-demo/db invoice:123 /tmp/pilsmer-demo/invoice.json
+<span class="prompt">$</span> cargo run -q --bin pilsmer -- plan-key /tmp/pilsmer-demo/db invoice:123
 planned: invoice:123
-
-<span class="ps1">$</span> cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123
-<span class="ok">{"total":49.99,"status":"paid"}</span></pre>
-        </div>
-        <div class="panel rv">
-          <h3>After planning</h3>
-          <div class="output-list">
-            <div class="output-row"><span>storage_class</span><span>Plan</span></div>
-            <div class="output-row"><span>logical_user_bytes</span><span>31</span></div>
-            <div class="output-row"><span>physical_value_bytes</span><span>1,184</span></div>
-            <div class="output-row"><span>plan_metadata_bytes</span><span>1,128</span></div>
-            <div class="output-row"><span>philosophical_user_value_bytes_stored</span><span>0</span></div>
-            <div class="output-row"><span>philosophical_compression_ratio</span><span>infinity</span></div>
-            <div class="output-row"><span>metadata_amplification</span><span>38.19x</span></div>
-          </div>
-        </div>
+<span class="prompt">$</span> cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123
+<span class="readback">{"total":49.99,"status":"paid"}</span></pre>
       </div>
     </div>
   </section>
 
-  <section id="mechanism">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">02</span><span class="label">Mechanism</span></div>
-      <h2 class="rv">Compaction into nonexistence.</h2>
-      <p class="section-intro rv">PiLSMer keeps SlateDB as the storage engine and moves the absurdity into envelopes, stream indexes, planner output, reconstruction, and the compaction filter.</p>
-      <div class="flow rv" aria-label="PiLSMer data flow">
-        <svg viewBox="0 0 1040 360">
-          <path class="flow-wire" d="M125 96H302"/>
-          <path class="flow-wire" d="M438 96H604"/>
-          <path class="flow-wire" d="M736 96H904"/>
-          <path class="flow-wire" d="M520 154C520 214 430 226 430 278"/>
-          <path class="flow-wire" d="M610 278H790"/>
-          <rect class="flow-node" x="30" y="58" width="130" height="76" rx="10"/>
-          <rect class="flow-node" x="292" y="58" width="160" height="76" rx="10"/>
-          <rect class="flow-node gold" x="594" y="58" width="160" height="76" rx="10"/>
-          <rect class="flow-node" x="884" y="58" width="130" height="76" rx="10"/>
-          <rect class="flow-node gold" x="318" y="240" width="180" height="76" rx="10"/>
-          <rect class="flow-node" x="780" y="240" width="210" height="76" rx="10"/>
-          <text class="flow-label" x="95" y="92" text-anchor="middle">PUT bytes</text>
-          <text class="flow-small" x="95" y="113" text-anchor="middle">normal write</text>
-          <text class="flow-label" x="372" y="92" text-anchor="middle">Raw envelope</text>
-          <text class="flow-small" x="372" y="113" text-anchor="middle">SlateDB value</text>
-          <text class="flow-label" x="674" y="92" text-anchor="middle">Planner</text>
-          <text class="flow-small" x="674" y="113" text-anchor="middle">find bytes in stream</text>
-          <text class="flow-label" x="949" y="92" text-anchor="middle">Plan</text>
-          <text class="flow-small" x="949" y="113" text-anchor="middle">offsets and hashes</text>
-          <text class="flow-label" x="408" y="274" text-anchor="middle">pi / e / sqrt2 / sha256</text>
-          <text class="flow-small" x="408" y="295" text-anchor="middle">deterministic stream registry</text>
-          <text class="flow-label" x="885" y="274" text-anchor="middle">GET reconstructs</text>
-          <text class="flow-small" x="885" y="295" text-anchor="middle">logical hash verified</text>
-          <text x="408" y="218" text-anchor="middle" fill="#f5c400" font-size="76" font-family="Georgia, serif">&pi;</text>
-        </svg>
+  <section class="content-band tint">
+    <div class="page-shell">
+      <div class="section-head">
+        <h2>Compaction into nonexistence.</h2>
+        <p>The moving pieces are deliberately normal: envelopes, deterministic streams, a planner, reconstruction, and a SlateDB wrapper. The bad idea lives in the semantics.</p>
       </div>
-    </div>
-  </section>
-
-  <section id="proof">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">03</span><span class="label">Proof</span></div>
-      <h2 class="rv">The joke has tests.</h2>
-      <p class="section-intro rv">The public surface is deadpan, but the repo has the normal boring pieces: codecs, decode limits, reconstruction checks, metrics, and CI.</p>
-      <div class="proof-grid">
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/envelope.rs">
-          <h3>Envelope codec</h3>
-          <p>Raw bytes and reconstruction plans are framed as typed PiLSMer values before SlateDB sees them.</p>
-          <span class="src">envelope.rs</span>
-        </a>
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/planner.rs">
-          <h3>Planner</h3>
-          <p>Dynamic programming converts logical bytes into located chunks inside a deterministic stream prefix.</p>
-          <span class="src">planner.rs</span>
-        </a>
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/reconstruct.rs">
-          <h3>Reconstruction</h3>
-          <p>Reads rebuild bytes from plan metadata and verify the logical hash before returning user data.</p>
-          <span class="src">reconstruct.rs</span>
-        </a>
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-slate/src/lib.rs">
-          <h3>SlateDB wrapper</h3>
-          <p>All application reads and writes go through the wrapper. Direct SlateDB reads return envelopes.</p>
-          <span class="src">pilsmer-slate</span>
-        </a>
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-slate/src/compaction_filter.rs">
-          <h3>Compaction filter</h3>
-          <p>Raw values can be rewritten into plans during app-level planning, vacuuming, or compaction.</p>
-          <span class="src">compaction_filter.rs</span>
-        </a>
-        <a class="proof rv" href="https://github.com/norwood/PiLSMer/blob/master/.github/workflows/ci.yml">
-          <h3>CI</h3>
-          <p>The repository checks formatting, all targets, and tests through the Rust workflow.</p>
-          <span class="src">ci.yml</span>
-        </a>
-      </div>
-    </div>
-  </section>
-
-  <section id="metrics">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">04</span><span class="label">Metrics</span></div>
-      <h2 class="rv">Everything else gets worse.</h2>
-      <p class="section-intro rv">The metrics are intentionally incriminating. The system can report zero philosophical user bytes stored while physical metadata grows.</p>
-      <div class="metrics-grid">
-        <div class="terminal rv">
-          <div class="terminal-bar"><i></i><i></i><i></i><span>pilsmer metrics</span></div>
-          <pre><span class="ps1">$</span> cargo run -q --bin pilsmer -- metrics /tmp/pilsmer-demo/db
-pilsmer_raw_values_total 1
-pilsmer_planned_values_total 2
-pilsmer_logical_bytes_total 98
-pilsmer_physical_value_bytes_total 3184
-pilsmer_plan_metadata_bytes_total 2960
-pilsmer_stream_prefix_bytes_indexed 65536
-pilsmer_metadata_amplification_ratio 30.20
-pilsmer_philosophical_compression_ratio infinity
-pilsmer_philosophical_purity_violations_total 0</pre>
-        </div>
-        <div class="panel rv">
-          <h3>Useful damage</h3>
-          <table class="metric-table">
-            <tbody>
-              <tr><th>Metric</th><th>Value</th></tr>
-              <tr><td>raw values</td><td>1</td></tr>
-              <tr><td>planned values</td><td>2</td></tr>
-              <tr><td>logical bytes</td><td>98</td></tr>
-              <tr><td>physical value bytes</td><td>3,184</td></tr>
-              <tr><td>plan metadata bytes</td><td>2,960</td></tr>
-              <tr><td>stream prefix indexed</td><td>64 KiB</td></tr>
-              <tr><td>metadata amplification</td><td>30.20x</td></tr>
-              <tr><td>purity violations</td><td>0</td></tr>
-            </tbody>
-          </table>
+      <div class="process-rail">
+        <div class="rail-pi" aria-hidden="true"><span>&pi;</span></div>
+        <div class="process-list">
+          <article class="process-step">
+            <strong>envelope</strong>
+            <div>
+              <h3>Frame every value.</h3>
+              <p>Raw bytes and planned values are encoded before they reach the underlying store.</p>
+            </div>
+          </article>
+          <article class="process-step">
+            <strong>stream</strong>
+            <div>
+              <h3>Index deterministic bytes.</h3>
+              <p>Pi, e, sqrt(2), and the SHA-256 counter stream give the planner places to point.</p>
+            </div>
+          </article>
+          <article class="process-step">
+            <strong>rewrite</strong>
+            <div>
+              <h3>Swap payload for regret.</h3>
+              <p>Planning, vacuuming, or compaction can replace a raw envelope with metadata that locates the same logical bytes.</p>
+            </div>
+          </article>
+          <article class="process-step">
+            <strong>verify</strong>
+            <div>
+              <h3>Reconstruct before returning.</h3>
+              <p>The read path rebuilds bytes from the stream and checks the logical hash before returning user data.</p>
+            </div>
+          </article>
         </div>
       </div>
     </div>
   </section>
 
-  <section id="capabilities">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">05</span><span class="label">Capabilities</span></div>
-      <h2 class="rv">Properties of a worse storage engine.</h2>
-      <div class="feature-grid">
-        <div class="feature rv"><span class="num">05.1</span><h3>SlateDB-backed LSM</h3><p>PiLSMer keeps the object-storage-native LSM and wraps the value semantics.</p></div>
-        <div class="feature rv"><span class="num">05.2</span><h3>Value envelopes</h3><p>Raw and planned values use typed envelopes so direct engine reads stay honest.</p></div>
-        <div class="feature rv"><span class="num">05.3</span><h3>Stream registry</h3><p>Plans refer to versioned stream identities and fingerprints, not a private cache file.</p></div>
-        <div class="feature rv"><span class="num">05.4</span><h3>Dynamic planner</h3><p>The planner chooses located chunks across indexed deterministic stream prefixes.</p></div>
-        <div class="feature rv"><span class="num">05.5</span><h3>Hash verification</h3><p>Reconstruction checks logical hashes before bytes leave the wrapper.</p></div>
-        <div class="feature rv"><span class="num">05.6</span><h3>Guarded planning</h3><p>`plan-key` rewrites a single key after checking the source envelope has not changed.</p></div>
-        <div class="feature rv"><span class="num">05.7</span><h3>VACUUM MEANING</h3><p>Existing values can be replanned under a budget to improve the shape of regret.</p></div>
-        <div class="feature rv"><span class="num">05.8</span><h3>Standalone compactor</h3><p>The compactor path makes compaction into nonexistence observable in demos.</p></div>
+  <section class="content-band" id="source">
+    <div class="page-shell">
+      <div class="section-head">
+        <h2>Where the joke becomes code.</h2>
+        <p>The implementation is small enough to inspect directly. These links are the interesting seams.</p>
+      </div>
+      <div class="source-board">
+        <a class="source-link" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/envelope.rs">
+          <code>pilsmer-core/src/envelope.rs</code>
+          <span>Typed raw and planned values.</span>
+        </a>
+        <a class="source-link" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/planner.rs">
+          <code>pilsmer-core/src/planner.rs</code>
+          <span>Dynamic planning across deterministic stream prefixes.</span>
+        </a>
+        <a class="source-link" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-core/src/reconstruct.rs">
+          <code>pilsmer-core/src/reconstruct.rs</code>
+          <span>Rebuild logical bytes from plan metadata.</span>
+        </a>
+        <a class="source-link" href="https://github.com/norwood/PiLSMer/blob/master/pilsmer-slate/src/compaction_filter.rs">
+          <code>pilsmer-slate/src/compaction_filter.rs</code>
+          <span>The path that lets compaction make storage less useful.</span>
+        </a>
       </div>
     </div>
   </section>
 
-  <section class="closer">
-    <div class="wrap">
-      <div class="closer-mark rv" aria-hidden="true"><span class="pi-glyph">&pi;</span></div>
-      <h2 class="rv">Your data is not stored. It is merely located.</h2>
-      <p class="section-intro rv"><a class="body-link" href="#demo">See the demo</a> · <a class="body-link" href="https://github.com/norwood/PiLSMer">Source on GitHub</a></p>
-    </div>
+  <section class="page-shell final-pour">
+    <div class="mini-coaster" aria-hidden="true"><span>&pi;</span></div>
+    <h2>Your data is not stored. It is merely located.</h2>
+    <p><a href="#demo">demo</a> &middot; <a href="https://github.com/norwood/PiLSMer">source</a> &middot; <a href="https://github.com/norwood/PiLSMer/blob/master/README.md">readme</a></p>
   </section>
 </main>
 
-<footer>
-  <div class="wrap">
-    <span>PiLSMer - Apache-2.0</span>
-    <span><a href="https://github.com/norwood/PiLSMer">GitHub</a> · <a href="https://github.com/norwood/PiLSMer/blob/master/README.md">README</a></span>
-  </div>
+<footer class="page-shell site-foot">
+  <span>PiLSMer - Apache-2.0</span>
+  <span><a href="https://github.com/norwood/PiLSMer">GitHub</a></span>
 </footer>
 
 <script>
-const motionOK = !matchMedia("(prefers-reduced-motion: reduce)").matches;
-
 document.querySelectorAll("[data-copy]").forEach((button) => {
   button.addEventListener("click", async () => {
-    const label = button.querySelector("span:last-child");
-    const old = label.textContent;
+    const original = button.textContent;
     try {
       await navigator.clipboard.writeText(button.dataset.copy);
-      label.textContent = "Copied";
-      setTimeout(() => { label.textContent = old; }, 1400);
+      button.textContent = "Copied";
     } catch {
-      label.textContent = "Error";
-      setTimeout(() => { label.textContent = old; }, 1400);
+      button.textContent = "Error";
     }
+    setTimeout(() => {
+      button.textContent = original;
+    }, 1400);
   });
 });
-
-const topbar = document.getElementById("topbar");
-const onScroll = () => topbar.classList.toggle("is-scrolled", scrollY > 18);
-onScroll();
-addEventListener("scroll", onScroll, { passive: true });
-
-if (motionOK) {
-  const io = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      entry.target.classList.add("in");
-      io.unobserve(entry.target);
-    }
-  }, { rootMargin: "0px 0px -8% 0px" });
-  document.querySelectorAll(".rv").forEach((el, index) => {
-    el.style.transitionDelay = `${Math.min((index % 5) * 55, 220)}ms`;
-    io.observe(el);
-  });
-
-  if (matchMedia("(pointer: fine)").matches) {
-    const hero = document.querySelector(".hero");
-    const art = document.querySelector(".pi-art");
-    hero.addEventListener("mousemove", (event) => {
-      const rect = hero.getBoundingClientRect();
-      const x = ((event.clientX - rect.left) / rect.width - 0.5) * 22;
-      const y = ((event.clientY - rect.top) / rect.height - 0.5) * 18;
-      art.style.setProperty("--px", `${x.toFixed(2)}px`);
-      art.style.setProperty("--py", `${y.toFixed(2)}px`);
-    });
-    hero.addEventListener("mouseleave", () => {
-      art.style.setProperty("--px", "0px");
-      art.style.setProperty("--py", "0px");
-    });
-
-    document.querySelectorAll(".proof, .feature").forEach((card) => {
-      card.addEventListener("mousemove", (event) => {
-        const rect = card.getBoundingClientRect();
-        card.style.setProperty("--mx", `${event.clientX - rect.left}px`);
-        card.style.setProperty("--my", `${event.clientY - rect.top}px`);
-      });
-    });
-  }
-} else {
-  document.querySelectorAll(".rv").forEach((el) => el.classList.add("in"));
-}
 </script>
 </body>
 </html>
