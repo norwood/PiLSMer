@@ -150,6 +150,7 @@ pub struct PiLsmDb {
     planner: Planner,
     reconstructor: Reconstructor,
     decode_limits: DecodeLimits,
+    max_reconstruct_bytes: u64,
     locks: Arc<KeyLocks>,
 }
 
@@ -198,6 +199,8 @@ pub struct PiLsmIterator {
     inner: DbIterator,
     reconstructor: Reconstructor,
     decode_limits: DecodeLimits,
+    reconstruct: bool,
+    max_reconstruct_bytes: u64,
 }
 
 pub struct PiLsmEnvelopeIterator {
@@ -221,6 +224,21 @@ pub struct PiLsmEnvelopeKeyValue {
 pub struct PiLsmExplainKeyValue {
     pub key: Bytes,
     pub explain: ExplainValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub reconstruct: bool,
+    pub max_reconstruct_bytes: Option<u64>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            reconstruct: true,
+            max_reconstruct_bytes: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -309,6 +327,7 @@ impl PiLsmDb {
             planner: opts.planner,
             reconstructor,
             decode_limits: opts.decode_limits,
+            max_reconstruct_bytes: opts.max_reconstruct_bytes,
             locks: Arc::new(KeyLocks::default()),
         }
     }
@@ -342,7 +361,10 @@ impl PiLsmDb {
         let Some(envelope) = self.get_envelope(key).await? else {
             return Ok(None);
         };
-        Ok(Some(self.logical_bytes(envelope).await?))
+        Ok(Some(
+            self.logical_bytes(envelope, self.max_reconstruct_bytes)
+                .await?,
+        ))
     }
 
     pub async fn get_envelope<K>(&self, key: K) -> Result<Option<ValueEnvelope>>
@@ -371,10 +393,26 @@ impl PiLsmDb {
         K: AsRef<[u8]> + Send,
         R: RangeBounds<K> + Send,
     {
+        self.scan_with_options(range, ScanOptions::default()).await
+    }
+
+    pub async fn scan_with_options<K, R>(
+        &self,
+        range: R,
+        options: ScanOptions,
+    ) -> Result<PiLsmIterator>
+    where
+        K: AsRef<[u8]> + Send,
+        R: RangeBounds<K> + Send,
+    {
         Ok(PiLsmIterator {
             inner: self.inner.scan(range).await?,
             reconstructor: self.reconstructor.clone(),
             decode_limits: self.decode_limits.clone(),
+            reconstruct: options.reconstruct,
+            max_reconstruct_bytes: options
+                .max_reconstruct_bytes
+                .unwrap_or(self.max_reconstruct_bytes),
         })
     }
 
@@ -497,7 +535,10 @@ impl PiLsmDb {
         };
 
         let old_chunk_count = old_plan.chunks.len();
-        let logical_bytes = self.reconstructor.reconstruct(&old_plan).await?;
+        let logical_bytes = self
+            .reconstructor
+            .reconstruct_with_limit(&old_plan, self.max_reconstruct_bytes)
+            .await?;
         let new_plan = match self.planner.plan_with_options(&logical_bytes, opts).await {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
@@ -546,10 +587,18 @@ impl PiLsmDb {
         .await
     }
 
-    async fn logical_bytes(&self, envelope: ValueEnvelope) -> CoreResult<Bytes> {
+    async fn logical_bytes(
+        &self,
+        envelope: ValueEnvelope,
+        max_reconstruct_bytes: u64,
+    ) -> CoreResult<Bytes> {
         match envelope {
             ValueEnvelope::Raw(bytes) => Ok(bytes),
-            ValueEnvelope::Plan(plan) => self.reconstructor.reconstruct(&plan).await,
+            ValueEnvelope::Plan(plan) => {
+                self.reconstructor
+                    .reconstruct_with_limit(&plan, max_reconstruct_bytes)
+                    .await
+            }
         }
     }
 
@@ -626,10 +675,21 @@ impl PiLsmIterator {
         let Some(kv) = self.inner.next().await? else {
             return Ok(None);
         };
+        if !self.reconstruct {
+            return Ok(Some(PiLsmKeyValue {
+                key: kv.key,
+                value: kv.value,
+            }));
+        }
+
         let envelope = ValueEnvelope::decode(&kv.value, &self.decode_limits)?;
         let value = match envelope {
             ValueEnvelope::Raw(bytes) => bytes,
-            ValueEnvelope::Plan(plan) => self.reconstructor.reconstruct(&plan).await?,
+            ValueEnvelope::Plan(plan) => {
+                self.reconstructor
+                    .reconstruct_with_limit(&plan, self.max_reconstruct_bytes)
+                    .await?
+            }
         };
         Ok(Some(PiLsmKeyValue { key: kv.key, value }))
     }
@@ -764,6 +824,13 @@ mod tests {
     use super::*;
 
     async fn demo_db(prefix: &'static [u8]) -> PiLsmDb {
+        demo_db_with_reconstruct_limit(prefix, 64 * 1024 * 1024).await
+    }
+
+    async fn demo_db_with_reconstruct_limit(
+        prefix: &'static [u8],
+        max_reconstruct_bytes: u64,
+    ) -> PiLsmDb {
         let stream: Arc<dyn ByteStream> = Arc::new(PrefixByteStream::new(
             StreamId::PiHexFractionPrefixV1 {
                 digest: [9_u8; 32],
@@ -795,7 +862,8 @@ mod tests {
                 ..PlanOptions::default()
             },
         );
-        let opts = PiLsmOptions::new(registry, planner);
+        let mut opts = PiLsmOptions::new(registry, planner);
+        opts.max_reconstruct_bytes = max_reconstruct_bytes;
         PiLsmDb::open("pilsmer-test", Arc::new(InMemory::new()), opts)
             .await
             .unwrap()
@@ -842,6 +910,47 @@ mod tests {
             Bytes::from_static(b"def")
         );
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_limits_apply_to_get_and_scan() {
+        let db = demo_db_with_reconstruct_limit(b"abcdef", 2).await;
+        db.put(b"a", b"abc").await.unwrap();
+        db.plan_key(b"a", PlanOptions::default()).await.unwrap();
+
+        assert!(matches!(
+            db.get(b"a").await,
+            Err(PiLsmDbError::Core(PiLsmError::DecodeLimitExceeded(
+                "max_reconstruct_bytes"
+            )))
+        ));
+
+        let mut iter = db
+            .scan::<Vec<u8>, _>(b"a".to_vec()..b"z".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            iter.next().await,
+            Err(PiLsmDbError::Core(PiLsmError::DecodeLimitExceeded(
+                "max_reconstruct_bytes"
+            )))
+        ));
+
+        let mut raw_iter = db
+            .scan_with_options::<Vec<u8>, _>(
+                b"a".to_vec()..b"z".to_vec(),
+                ScanOptions {
+                    reconstruct: false,
+                    max_reconstruct_bytes: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        let raw = raw_iter.next().await.unwrap().unwrap();
+        assert!(matches!(
+            ValueEnvelope::decode(&raw.value, &DecodeLimits::default()).unwrap(),
+            ValueEnvelope::Plan(_)
+        ));
     }
 
     #[tokio::test]

@@ -15,6 +15,18 @@ impl Reconstructor {
     }
 
     pub async fn reconstruct(&self, plan: &ReconstructionPlan) -> Result<Bytes> {
+        self.reconstruct_with_limit(plan, u64::MAX).await
+    }
+
+    pub async fn reconstruct_with_limit(
+        &self,
+        plan: &ReconstructionPlan,
+        max_logical_len: u64,
+    ) -> Result<Bytes> {
+        if plan.logical_len > max_logical_len {
+            return Err(PiLsmError::DecodeLimitExceeded("max_reconstruct_bytes"));
+        }
+
         let cap = usize::try_from(plan.logical_len)
             .map_err(|_| PiLsmError::DecodeLimitExceeded("logical_len"))?;
         let mut out = BytesMut::with_capacity(cap);

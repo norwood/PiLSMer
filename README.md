@@ -113,6 +113,9 @@ return envelopes, not user values.
 After any successful `put`, `plan-key`, `vacuum-meaning`, or compaction-filter
 rewrite, `get` should return the original logical bytes unless the key was
 deleted. Planned values carry logical hashes and reconstruction verifies them.
+The wrapper enforces `max_reconstruct_bytes` for planned reads and scans. Use
+`scan_with_options(..., reconstruct: false)` or `scan_envelopes` for raw stored
+envelopes without reconstructing planned values.
 
 ## Why
 
