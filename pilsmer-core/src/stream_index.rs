@@ -89,20 +89,25 @@ impl StreamIndex {
                 break;
             }
             let table = PackedKGramTable::build(prefix, k, options.max_offsets_per_kgram)?;
-            estimated_bytes = estimated_bytes
+            let next_estimated_bytes = estimated_bytes
                 .checked_add(table.estimated_bytes())
                 .ok_or(PiLsmError::ArithmeticOverflow)?;
-            if estimated_bytes > options.max_index_memory_bytes {
-                return Err(PiLsmError::IndexLimitExceeded("index memory budget"));
+            if next_estimated_bytes > options.max_index_memory_bytes {
+                if by_len.is_empty() {
+                    return Err(PiLsmError::IndexLimitExceeded("index memory budget"));
+                }
+                break;
             }
+            estimated_bytes = next_estimated_bytes;
             by_len.push(table);
         }
 
+        let max_k = by_len.len();
         Ok(Self {
             stream_id,
             stream_fingerprint,
             prefix_len,
-            max_k: options.max_k,
+            max_k,
             memory_budget_bytes: options.max_index_memory_bytes,
             by_len,
         })
@@ -264,5 +269,42 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].offset, 0);
         assert_eq!(candidates[1].offset, 5);
+    }
+
+    #[tokio::test]
+    async fn index_caps_max_k_to_memory_budget() {
+        let stream = stream_for(b"abcd");
+        let index = StreamIndex::build(
+            stream,
+            StreamIndexOptions {
+                max_prefix_len: 4,
+                max_k: 3,
+                max_index_memory_bytes: 100,
+                max_offsets_per_kgram: 4,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(index.max_k(), 1);
+        assert!(!index.find_candidates(b"a").is_empty());
+        assert!(index.find_candidates(b"ab").is_empty());
+    }
+
+    #[tokio::test]
+    async fn index_errors_when_budget_cannot_fit_first_table() {
+        let err = StreamIndex::build(
+            stream_for(b"abcd"),
+            StreamIndexOptions {
+                max_prefix_len: 4,
+                max_k: 3,
+                max_index_memory_bytes: 1,
+                max_offsets_per_kgram: 4,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, PiLsmError::IndexLimitExceeded("index memory budget"));
     }
 }
