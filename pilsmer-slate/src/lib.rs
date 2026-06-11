@@ -1246,6 +1246,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_keys_read_as_missing() {
+        let db = demo_db(b"abcdef").await;
+        db.put(b"k", b"abc").await.unwrap();
+        db.plan_key(b"k", PlanOptions::default()).await.unwrap();
+
+        db.delete(b"k").await.unwrap();
+
+        assert_eq!(db.get(b"k").await.unwrap(), None);
+        assert!(db.get_envelope(b"k").await.unwrap().is_none());
+        assert!(db.explain(b"k").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn put_options_can_create_immediate_plan_for_tests() {
         let db = demo_db(b"abcdef").await;
         let handle = db

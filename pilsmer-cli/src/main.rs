@@ -59,6 +59,10 @@ enum Command {
         path: PathBuf,
         key: String,
     },
+    Delete {
+        path: PathBuf,
+        key: String,
+    },
     Explain {
         path: PathBuf,
         key: String,
@@ -220,6 +224,12 @@ async fn main() -> Result<()> {
                 bail!("key not found: {key}");
             };
             std::io::stdout().write_all(&value)?;
+            db.close().await?;
+        }
+        Command::Delete { path, key } => {
+            let db = open_db(&path, &plan_options, stream_kind).await?;
+            db.delete(key.as_bytes()).await?;
+            db.flush().await?;
             db.close().await?;
         }
         Command::Explain { path, key } => {

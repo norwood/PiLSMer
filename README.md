@@ -89,6 +89,7 @@ literal bytes.
 pilsmer init <db>
 pilsmer put <db> <key> <file>
 pilsmer get <db> <key>
+pilsmer delete <db> <key>
 pilsmer explain <db> <key>
 pilsmer plan-key <db> <key>
 pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
