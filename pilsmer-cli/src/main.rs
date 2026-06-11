@@ -11,8 +11,9 @@ use pilsmer_core::{
     StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
-    run_compactor_with_options, CompactionMode, PiLsmCompactionFilterSupplier,
-    PiLsmCompactorOptions, PiLsmDb, PiLsmMetrics, PiLsmOptions, RewriteStatus,
+    run_compactor_with_options, CompactionMode, PiLsmCompactionFilterStats,
+    PiLsmCompactionFilterSupplier, PiLsmCompactorOptions, PiLsmDb, PiLsmMetrics, PiLsmOptions,
+    RewriteStatus,
 };
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::ObjectStore;
@@ -312,7 +313,7 @@ async fn main() -> Result<()> {
             run_compactor_with_options(
                 db_path,
                 object_store,
-                supplier,
+                supplier.clone(),
                 PiLsmCompactorOptions {
                     run_for: Duration::from_millis(run_ms),
                     poll_interval: Duration::from_millis(poll_ms),
@@ -320,6 +321,7 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+            print_compaction_filter_stats(&supplier.stats());
         }
         Command::Bench {
             path,
@@ -1180,6 +1182,27 @@ fn print_metrics(metrics: &PiLsmMetrics) {
         "pilsmer_representation_entropy_excuses_total {}",
         metrics.representation_entropy_excuses_total
     );
+}
+
+fn print_compaction_filter_stats(stats: &PiLsmCompactionFilterStats) {
+    println!("raw_values_converted: {}", stats.raw_values_converted);
+    println!("raw_bytes_converted: {}", stats.raw_bytes_converted);
+    println!("plans_improved: {}", stats.plans_improved);
+    println!("plans_kept: {}", stats.plans_kept);
+    println!(
+        "raw_values_kept_after_planning_failure: {}",
+        stats.raw_values_kept_after_planning_failure
+    );
+    println!("corrupt_or_unknown_kept: {}", stats.corrupt_or_unknown_kept);
+    println!(
+        "snapshot_protected_entries: {}",
+        stats.snapshot_protected_entries
+    );
+    println!(
+        "tombstones_or_merges_kept: {}",
+        stats.tombstones_or_merges_kept
+    );
+    println!("errors: {}", stats.errors);
 }
 
 fn metric_optional(value: Option<f64>) -> String {

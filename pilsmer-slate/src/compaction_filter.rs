@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use bytes::Bytes;
 use pilsmer_core::{
     explain_envelope, DecodeLimits, PiLsmError, Planner, Reconstructor, StorageClass, ValueEnvelope,
@@ -18,12 +21,58 @@ pub enum CompactionMode {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PiLsmCompactionFilterStats {
     pub raw_values_converted: u64,
+    pub raw_bytes_converted: u64,
     pub plans_improved: u64,
     pub plans_kept: u64,
     pub raw_values_kept_after_planning_failure: u64,
     pub corrupt_or_unknown_kept: u64,
     pub snapshot_protected_entries: u64,
     pub tombstones_or_merges_kept: u64,
+    pub errors: u64,
+}
+
+#[derive(Default)]
+struct SharedCompactionFilterStats {
+    raw_values_converted: AtomicU64,
+    raw_bytes_converted: AtomicU64,
+    plans_improved: AtomicU64,
+    plans_kept: AtomicU64,
+    raw_values_kept_after_planning_failure: AtomicU64,
+    corrupt_or_unknown_kept: AtomicU64,
+    snapshot_protected_entries: AtomicU64,
+    tombstones_or_merges_kept: AtomicU64,
+    errors: AtomicU64,
+}
+
+impl SharedCompactionFilterStats {
+    fn snapshot(&self) -> PiLsmCompactionFilterStats {
+        PiLsmCompactionFilterStats {
+            raw_values_converted: self.load(&self.raw_values_converted),
+            raw_bytes_converted: self.load(&self.raw_bytes_converted),
+            plans_improved: self.load(&self.plans_improved),
+            plans_kept: self.load(&self.plans_kept),
+            raw_values_kept_after_planning_failure: self
+                .load(&self.raw_values_kept_after_planning_failure),
+            corrupt_or_unknown_kept: self.load(&self.corrupt_or_unknown_kept),
+            snapshot_protected_entries: self.load(&self.snapshot_protected_entries),
+            tombstones_or_merges_kept: self.load(&self.tombstones_or_merges_kept),
+            errors: self.load(&self.errors),
+        }
+    }
+
+    fn increment(&self, counter: &AtomicU64) {
+        self.add(counter, 1);
+    }
+
+    fn add(&self, counter: &AtomicU64, value: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(value))
+        });
+    }
+
+    fn load(&self, counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone)]
@@ -34,6 +83,7 @@ pub struct PiLsmCompactionFilterSupplier {
     mode: CompactionMode,
     strict_envelopes: bool,
     snapshot_safe_filtering: bool,
+    stats: Arc<SharedCompactionFilterStats>,
 }
 
 impl PiLsmCompactionFilterSupplier {
@@ -45,6 +95,7 @@ impl PiLsmCompactionFilterSupplier {
             mode: CompactionMode::Normal,
             strict_envelopes: false,
             snapshot_safe_filtering: true,
+            stats: Arc::new(SharedCompactionFilterStats::default()),
         }
     }
 
@@ -67,6 +118,10 @@ impl PiLsmCompactionFilterSupplier {
         self.snapshot_safe_filtering = snapshot_safe_filtering;
         self
     }
+
+    pub fn stats(&self) -> PiLsmCompactionFilterStats {
+        self.stats.snapshot()
+    }
 }
 
 #[async_trait::async_trait]
@@ -84,6 +139,7 @@ impl CompactionFilterSupplier for PiLsmCompactionFilterSupplier {
             snapshot_safe_filtering: self.snapshot_safe_filtering,
             context: context.clone(),
             stats: PiLsmCompactionFilterStats::default(),
+            shared_stats: self.stats.clone(),
         }))
     }
 }
@@ -97,6 +153,7 @@ struct PiLsmCompactionFilter {
     snapshot_safe_filtering: bool,
     context: CompactionJobContext,
     stats: PiLsmCompactionFilterStats,
+    shared_stats: Arc<SharedCompactionFilterStats>,
 }
 
 #[async_trait::async_trait]
@@ -105,7 +162,14 @@ impl CompactionFilter for PiLsmCompactionFilter {
         &mut self,
         entry: &RowEntry,
     ) -> Result<CompactionFilterDecision, CompactionFilterError> {
-        self.filter_entry(entry).await.map_err(filter_error)
+        match self.filter_entry(entry).await {
+            Ok(decision) => Ok(decision),
+            Err(err) => {
+                self.stats.errors += 1;
+                self.shared_stats.increment(&self.shared_stats.errors);
+                Err(filter_error(err))
+            }
+        }
     }
 
     async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
@@ -120,6 +184,8 @@ impl PiLsmCompactionFilter {
     ) -> Result<CompactionFilterDecision, PiLsmError> {
         if self.snapshot_safe_filtering && !self.snapshot_safe_to_modify(entry) {
             self.stats.snapshot_protected_entries += 1;
+            self.shared_stats
+                .increment(&self.shared_stats.snapshot_protected_entries);
             return Ok(CompactionFilterDecision::Keep);
         }
 
@@ -127,6 +193,8 @@ impl PiLsmCompactionFilter {
             ValueDeletable::Value(bytes) => bytes,
             ValueDeletable::Merge(_) | ValueDeletable::Tombstone => {
                 self.stats.tombstones_or_merges_kept += 1;
+                self.shared_stats
+                    .increment(&self.shared_stats.tombstones_or_merges_kept);
                 return Ok(CompactionFilterDecision::Keep);
             }
         };
@@ -136,6 +204,8 @@ impl PiLsmCompactionFilter {
             Err(err) if self.strict_envelopes => return Err(err),
             Err(_) => {
                 self.stats.corrupt_or_unknown_kept += 1;
+                self.shared_stats
+                    .increment(&self.shared_stats.corrupt_or_unknown_kept);
                 return Ok(CompactionFilterDecision::Keep);
             }
         };
@@ -148,6 +218,7 @@ impl PiLsmCompactionFilter {
             }
             (_, ValueEnvelope::Plan(_)) => {
                 self.stats.plans_kept += 1;
+                self.shared_stats.increment(&self.shared_stats.plans_kept);
                 Ok(CompactionFilterDecision::Keep)
             }
         }
@@ -158,12 +229,19 @@ impl PiLsmCompactionFilter {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) if self.mode == CompactionMode::Normal => {
                 self.stats.raw_values_kept_after_planning_failure += 1;
+                self.shared_stats
+                    .increment(&self.shared_stats.raw_values_kept_after_planning_failure);
                 return Ok(CompactionFilterDecision::Keep);
             }
             Err(err) => return Err(err),
         };
 
         self.stats.raw_values_converted += 1;
+        self.stats.raw_bytes_converted += raw.len() as u64;
+        self.shared_stats
+            .increment(&self.shared_stats.raw_values_converted);
+        self.shared_stats
+            .add(&self.shared_stats.raw_bytes_converted, raw.len() as u64);
         Ok(CompactionFilterDecision::Modify(ValueDeletable::Value(
             ValueEnvelope::Plan(plan).encode().into(),
         )))
@@ -179,6 +257,7 @@ impl PiLsmCompactionFilter {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
                 self.stats.plans_kept += 1;
+                self.shared_stats.increment(&self.shared_stats.plans_kept);
                 return Ok(CompactionFilterDecision::Keep);
             }
             Err(err) => return Err(err),
@@ -187,11 +266,14 @@ impl PiLsmCompactionFilter {
 
         if plan_score(&new_envelope) < plan_score(&old_envelope) {
             self.stats.plans_improved += 1;
+            self.shared_stats
+                .increment(&self.shared_stats.plans_improved);
             Ok(CompactionFilterDecision::Modify(ValueDeletable::Value(
                 new_envelope.into(),
             )))
         } else {
             self.stats.plans_kept += 1;
+            self.shared_stats.increment(&self.shared_stats.plans_kept);
             Ok(CompactionFilterDecision::Keep)
         }
     }
@@ -283,6 +365,7 @@ mod tests {
             snapshot_safe_filtering,
             context,
             stats: PiLsmCompactionFilterStats::default(),
+            shared_stats: Arc::new(SharedCompactionFilterStats::default()),
         }
     }
 
@@ -302,6 +385,8 @@ mod tests {
         let CompactionFilterDecision::Modify(ValueDeletable::Value(bytes)) = decision else {
             panic!("expected modified value");
         };
+        assert_eq!(filter.stats.raw_values_converted, 1);
+        assert_eq!(filter.stats.raw_bytes_converted, 3);
         assert!(matches!(
             ValueEnvelope::decode(&bytes, &DecodeLimits::default()).unwrap(),
             ValueEnvelope::Plan(_)
@@ -326,6 +411,7 @@ mod tests {
 
         let decision = filter.filter(&entry).await.unwrap();
         assert_eq!(decision, CompactionFilterDecision::Keep);
+        assert_eq!(filter.stats.plans_kept, 1);
     }
 
     #[tokio::test]
@@ -342,6 +428,7 @@ mod tests {
 
         let decision = filter.filter(&entry).await.unwrap();
         assert_eq!(decision, CompactionFilterDecision::Keep);
+        assert_eq!(filter.stats.raw_values_kept_after_planning_failure, 1);
     }
 
     #[tokio::test]
@@ -374,5 +461,34 @@ mod tests {
 
         let decision = filter.filter(&entry).await.unwrap();
         assert_eq!(decision, CompactionFilterDecision::Keep);
+        assert_eq!(filter.stats.snapshot_protected_entries, 1);
+    }
+
+    #[tokio::test]
+    async fn supplier_accumulates_filter_stats() {
+        let mut filter = filter_for(b"abcdef", CompactionMode::Normal, true, true).await;
+        let shared_stats = filter.shared_stats.clone();
+        let supplier = PiLsmCompactionFilterSupplier::new(
+            filter.planner.clone(),
+            filter.reconstructor.clone(),
+        );
+        let supplier = PiLsmCompactionFilterSupplier {
+            stats: shared_stats,
+            ..supplier
+        };
+        let raw = ValueEnvelope::Raw(Bytes::from_static(b"abc")).encode();
+        let entry = RowEntry {
+            key: Bytes::from_static(b"k"),
+            value: ValueDeletable::Value(raw.into()),
+            seq: 1,
+            create_ts: None,
+            expire_ts: None,
+        };
+
+        filter.filter(&entry).await.unwrap();
+
+        let stats = supplier.stats();
+        assert_eq!(stats.raw_values_converted, 1);
+        assert_eq!(stats.raw_bytes_converted, 3);
     }
 }

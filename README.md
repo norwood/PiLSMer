@@ -69,7 +69,8 @@ cargo run -q --bin pilsmer -- compact /tmp/pilsmer-demo/db --into-nonexistence -
 PiLSMer compaction filter installed. It still uses SlateDB's size-tiered
 scheduler, so it is workload-dependent. The default `--min-compaction-sources`
 is 4; use 2 for toy workloads with multiple flushed L0 files. `plan-key` is the
-clearer single-key demo.
+clearer single-key demo. After the bounded run, `compact` prints aggregate
+compaction-filter stats from that process.
 
 For maximum embarrassment:
 
