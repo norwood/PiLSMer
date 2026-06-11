@@ -195,6 +195,27 @@ pub struct PiLsmKeyValue {
     pub value: Bytes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PutOptions {
+    pub await_durable: bool,
+    pub allow_immediate_plan: bool,
+}
+
+impl Default for PutOptions {
+    fn default() -> Self {
+        Self {
+            await_durable: false,
+            allow_immediate_plan: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteHandle {
+    pub storage_class: StorageClass,
+    pub physical_value_bytes: usize,
+}
+
 pub struct PiLsmIterator {
     inner: DbIterator,
     reconstructor: Reconstructor,
@@ -332,16 +353,46 @@ impl PiLsmDb {
         }
     }
 
-    pub async fn put<K, V>(&self, key: K, value: V) -> Result<()>
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<WriteHandle>
+    where
+        K: AsRef<[u8]> + Send,
+        V: AsRef<[u8]> + Send,
+    {
+        self.put_with_options(key, value, PutOptions::default())
+            .await
+    }
+
+    pub async fn put_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        options: PutOptions,
+    ) -> Result<WriteHandle>
     where
         K: AsRef<[u8]> + Send,
         V: AsRef<[u8]> + Send,
     {
         let key_bytes = key.as_ref().to_vec();
         let _guard = self.lock_key(&key_bytes).await;
-        let encoded = ValueEnvelope::Raw(Bytes::copy_from_slice(value.as_ref())).encode();
+        let envelope = if options.allow_immediate_plan {
+            ValueEnvelope::Plan(self.planner.plan(value.as_ref()).await?)
+        } else {
+            ValueEnvelope::Raw(Bytes::copy_from_slice(value.as_ref()))
+        };
+        let storage_class = match &envelope {
+            ValueEnvelope::Raw(_) => StorageClass::Raw,
+            ValueEnvelope::Plan(_) => StorageClass::Plan,
+        };
+        let encoded = envelope.encode();
+        let physical_value_bytes = encoded.len();
         self.inner.put(key_bytes, encoded).await?;
-        Ok(())
+        if options.await_durable {
+            self.inner.flush().await?;
+        }
+        Ok(WriteHandle {
+            storage_class,
+            physical_value_bytes,
+        })
     }
 
     pub async fn delete<K>(&self, key: K) -> Result<()>
@@ -872,7 +923,8 @@ mod tests {
     #[tokio::test]
     async fn put_get_and_plan_key_roundtrip() {
         let db = demo_db(b"abcdef").await;
-        db.put(b"k", b"abc").await.unwrap();
+        let handle = db.put(b"k", b"abc").await.unwrap();
+        assert_eq!(handle.storage_class, StorageClass::Raw);
         assert_eq!(
             db.get(b"k").await.unwrap(),
             Some(Bytes::from_static(b"abc"))
@@ -888,6 +940,32 @@ mod tests {
 
         let report = db.plan_key(b"k", PlanOptions::default()).await.unwrap();
         assert_eq!(report.status, RewriteStatus::KeptAlreadyPlanned);
+    }
+
+    #[tokio::test]
+    async fn put_options_can_create_immediate_plan_for_tests() {
+        let db = demo_db(b"abcdef").await;
+        let handle = db
+            .put_with_options(
+                b"k",
+                b"abc",
+                PutOptions {
+                    await_durable: true,
+                    allow_immediate_plan: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.storage_class, StorageClass::Plan);
+        assert!(handle.physical_value_bytes > 0);
+        assert!(matches!(
+            db.get_envelope(b"k").await.unwrap().unwrap(),
+            ValueEnvelope::Plan(_)
+        ));
+        assert_eq!(
+            db.get(b"k").await.unwrap(),
+            Some(Bytes::from_static(b"abc"))
+        );
     }
 
     #[tokio::test]
