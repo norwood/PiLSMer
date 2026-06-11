@@ -94,7 +94,7 @@ pilsmer plan-key <db> <key>
 pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
 pilsmer metrics <db>
 pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
-pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png] [--suite]
+pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite]
 ```
 
 Global planning options:

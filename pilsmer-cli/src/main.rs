@@ -168,6 +168,8 @@ enum BenchWorkload {
     UuidHeavy,
     AllBytes,
     TinyPng,
+    #[value(name = "png-256k")]
+    Png256k,
 }
 
 impl BenchWorkload {
@@ -181,6 +183,7 @@ impl BenchWorkload {
             Self::UuidHeavy => "uuid-heavy",
             Self::AllBytes => "all-bytes",
             Self::TinyPng => "tiny-png",
+            Self::Png256k => "png-256k",
         }
     }
 }
@@ -516,9 +519,9 @@ async fn run_bench_suite(
             value_size: 64 * 1024,
         },
         BenchCase {
-            workload: BenchWorkload::TinyPng,
+            workload: BenchWorkload::Png256k,
             value_count: 1,
-            value_size: 68,
+            value_size: 256 * 1024,
         },
         BenchCase {
             workload: BenchWorkload::UuidHeavy,
@@ -689,6 +692,7 @@ async fn generate_values(case: BenchCase) -> Result<Vec<Vec<u8>>> {
         BenchWorkload::TinyPng => Ok((0..case.value_count)
             .map(|_| TINY_PNG_BYTES.to_vec())
             .collect()),
+        BenchWorkload::Png256k => generate_png_values(case.value_count, case.value_size),
     }
 }
 
@@ -757,6 +761,105 @@ fn generate_all_byte_values(value_count: usize, value_size: usize) -> Result<Vec
                 .collect()
         })
         .collect())
+}
+
+fn generate_png_values(value_count: usize, target_size: usize) -> Result<Vec<Vec<u8>>> {
+    (0..value_count)
+        .map(|ix| generate_png_fixture(target_size, ix))
+        .collect()
+}
+
+fn generate_png_fixture(target_size: usize, seed: usize) -> Result<Vec<u8>> {
+    const WIDTH: usize = 256;
+    const CHANNELS: usize = 3;
+    const CONTAINER_OVERHEAD: usize = 128;
+
+    let row_len = 1 + WIDTH * CHANNELS;
+    let target_pixel_bytes = target_size.saturating_sub(CONTAINER_OVERHEAD).max(row_len);
+    let height = target_pixel_bytes.div_ceil(row_len);
+    let raw_len = height
+        .checked_mul(row_len)
+        .context("PNG benchmark fixture is too large")?;
+    let height_u32 = u32::try_from(height).context("PNG benchmark height exceeds u32")?;
+
+    let mut raw = Vec::with_capacity(raw_len);
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..WIDTH {
+            raw.push(((x + seed) & 0xff) as u8);
+            raw.push(((y + seed * 3) & 0xff) as u8);
+            raw.push(((x ^ y ^ seed) & 0xff) as u8);
+        }
+    }
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&(WIDTH as u32).to_be_bytes());
+    ihdr.extend_from_slice(&height_u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+
+    let mut png = Vec::new();
+    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    append_png_chunk(&mut png, b"IHDR", &ihdr)?;
+    append_png_chunk(&mut png, b"IDAT", &zlib_stored(&raw)?)?;
+    append_png_chunk(&mut png, b"IEND", &[])?;
+    Ok(png)
+}
+
+fn zlib_stored(data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() + 6 + data.len().div_ceil(65_535) * 5);
+    out.extend_from_slice(&[0x78, 0x01]);
+
+    let mut offset = 0;
+    while offset < data.len() {
+        let remaining = data.len() - offset;
+        let block_len = remaining.min(65_535);
+        let is_final = offset + block_len == data.len();
+        out.push(if is_final { 0x01 } else { 0x00 });
+        let len = u16::try_from(block_len).context("deflate stored block is too large")?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(&data[offset..offset + block_len]);
+        offset += block_len;
+    }
+
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    Ok(out)
+}
+
+fn append_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<()> {
+    let len = u32::try_from(data.len()).context("PNG chunk is too large")?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+
+    let mut crc_input = Vec::with_capacity(chunk_type.len() + data.len());
+    crc_input.extend_from_slice(chunk_type);
+    crc_input.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    Ok(())
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65_521;
+    let mut a = 1_u32;
+    let mut b = 0_u32;
+    for byte in data {
+        a = (a + u32::from(*byte)) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+    (b << 16) | a
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 fn repeated_ascii(len: usize, pattern: &[u8]) -> String {
@@ -1567,4 +1670,25 @@ fn read_value(file: &Path) -> Result<Vec<u8>> {
 
 fn print_rewrite_status(status: RewriteStatus) {
     println!("status: {status:?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_png_fixture_is_png_shaped_and_sized() {
+        let png = generate_png_fixture(64 * 1024, 7).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.windows(4).any(|window| window == b"IHDR"));
+        assert!(png.windows(4).any(|window| window == b"IDAT"));
+        assert!(png.windows(4).any(|window| window == b"IEND"));
+        assert!(png.len() >= 64 * 1024);
+    }
+
+    #[test]
+    fn png_crc_and_zlib_checksums_match_known_values() {
+        assert_eq!(crc32(b"IEND"), 0xae42_6082);
+        assert_eq!(adler32(b""), 1);
+    }
 }
