@@ -25,6 +25,13 @@ CLI benchmark and ceremonial codec are available.
 
 Run commands from the repo root.
 
+For the full local demo, including JSON, a tiny PNG, ceremonial planning,
+`VACUUM MEANING`, metrics, and the benchmark matrix:
+
+```sh
+scripts/demo.sh
+```
+
 ```sh
 cargo run -q --bin pilsmer -- init /tmp/pilsmer-demo/db
 printf '{"total":49.99,"status":"paid"}' > /tmp/pilsmer-demo/invoice.json
