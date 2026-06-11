@@ -49,8 +49,9 @@ changed.
 and philosophical compression status.
 
 The default stream is `sha256-counter:v1` because it can produce arbitrary
-prefix sizes. The pi demo stream is available with `--stream pi-prefix` and a
-256-byte built-in prefix:
+prefix sizes. The default SHA prefix is 16 MiB; pass `--prefix-bytes` for
+faster toy runs. The pi demo stream is available with `--stream pi-prefix` and
+a 256-byte built-in prefix:
 
 ```sh
 printf '\x24\x3f\x6a\x88' > /tmp/pilsmer-demo/pi-bytes.bin

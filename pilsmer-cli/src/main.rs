@@ -382,7 +382,7 @@ async fn main() -> Result<()> {
 
 fn default_prefix_bytes(stream_kind: StreamKind) -> u64 {
     match stream_kind {
-        StreamKind::Sha256Counter => 1_048_576,
+        StreamKind::Sha256Counter => PlanOptions::default().max_prefix_len,
         StreamKind::PiPrefix => PI_HEX_FRACTION_PREFIX_BYTES as u64,
     }
 }
