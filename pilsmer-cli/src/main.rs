@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::stream::BoxStream;
 use pilsmer_core::{
-    pi_hex_fraction_prefix_stream, ByteStream, PhilosophicalCompressionRatio, PlanCodec,
-    PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions,
-    StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
+    pi_hex_fraction_prefix_stream, ByteStream, ExplainValue, PhilosophicalCompressionRatio,
+    PlanCodec, PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex,
+    StreamIndexOptions, StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
     run_compactor_with_options, CompactionMode, PiLsmCompactionFilterStats,
@@ -84,6 +84,9 @@ enum Command {
         budget: Option<Duration>,
     },
     Metrics {
+        path: PathBuf,
+    },
+    Shell {
         path: PathBuf,
     },
     Compact {
@@ -281,30 +284,7 @@ async fn main() -> Result<()> {
             let Some(explain) = db.explain(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
             };
-            println!("storage_class: {:?}", explain.storage_class);
-            println!("logical_user_bytes: {}", explain.logical_user_bytes);
-            println!("physical_value_bytes: {}", explain.physical_value_bytes);
-            println!("plan_metadata_bytes: {}", explain.plan_metadata_bytes);
-            println!("chunks: {}", explain.chunks);
-            println!("longest_natural_run: {}", explain.longest_natural_run);
-            println!("literal_bytes: {}", explain.literal_bytes);
-            match explain.average_chunk_len {
-                Some(len) => println!("average_chunk_len: {len:.2}"),
-                None => println!("average_chunk_len: undefined"),
-            }
-            println!(
-                "philosophical_user_value_bytes_stored: {}",
-                explain.philosophical_user_value_bytes_stored
-            );
-            println!(
-                "philosophical_compression_ratio: {}",
-                philosophical_compression_ratio(explain.philosophical_compression_ratio)
-            );
-            println!("purity: {:?}", explain.purity);
-            match explain.metadata_amplification_ratio {
-                Some(ratio) => println!("metadata_amplification: {ratio:.2}x"),
-                None => println!("metadata_amplification: undefined"),
-            }
+            print_explain(&explain);
             db.close().await?;
         }
         Command::PlanKey { path, key } => {
@@ -336,11 +316,7 @@ async fn main() -> Result<()> {
             match (all, key) {
                 (true, None) => {
                     let report = vacuum_all(&db, &plan_options, budget).await?;
-                    println!("visited: {}", report.visited);
-                    println!("rewritten: {}", report.rewritten);
-                    println!("kept: {}", report.kept);
-                    println!("stale_or_missing: {}", report.stale_or_missing);
-                    println!("timed_out: {}", report.timed_out);
+                    print_rewrite_all_report(&report);
                 }
                 (false, Some(key)) => {
                     let report = db.vacuum_meaning(key.as_bytes(), plan_options).await?;
@@ -362,6 +338,17 @@ async fn main() -> Result<()> {
             .await?;
             let metrics = db.metrics().await?;
             print_metrics(&metrics);
+            db.close().await?;
+        }
+        Command::Shell { path } => {
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
+            run_shell(&db, &plan_options).await?;
             db.close().await?;
         }
         Command::Compact {
@@ -476,6 +463,163 @@ struct VacuumAllReport {
     kept: u64,
     stale_or_missing: u64,
     timed_out: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShellCommand {
+    Put { key: String, value: Vec<u8> },
+    Get { key: String },
+    ExplainGet { key: String },
+    CompactIntoNonexistence,
+    VacuumMeaning,
+    Exit,
+}
+
+async fn run_shell(db: &PiLsmDb, plan_options: &PlanOptions) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+
+    for (line_ix, line) in input.lines().enumerate() {
+        let Some(command) = parse_shell_command(line)
+            .with_context(|| format!("parsing shell line {}", line_ix + 1))?
+        else {
+            continue;
+        };
+
+        match command {
+            ShellCommand::Put { key, value } => {
+                db.put(key.as_bytes(), value).await?;
+                db.flush().await?;
+                println!("OK");
+            }
+            ShellCommand::Get { key } => {
+                let Some(value) = db.get(key.as_bytes()).await? else {
+                    bail!("key not found: {key}");
+                };
+                std::io::stdout().write_all(&value)?;
+                println!();
+            }
+            ShellCommand::ExplainGet { key } => {
+                let Some(explain) = db.explain(key.as_bytes()).await? else {
+                    bail!("key not found: {key}");
+                };
+                print_explain(&explain);
+            }
+            ShellCommand::CompactIntoNonexistence => {
+                let compact_options = PlanOptions {
+                    max_k: 1,
+                    plan_codec: PlanCodec::CeremonialCbor,
+                    ..plan_options.clone()
+                };
+                let report = plan_all(db, &compact_options).await?;
+                db.flush().await?;
+                print_rewrite_all_report(&report);
+            }
+            ShellCommand::VacuumMeaning => {
+                let report = vacuum_all(db, plan_options, None).await?;
+                db.flush().await?;
+                print_rewrite_all_report(&report);
+            }
+            ShellCommand::Exit => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_shell_command(line: &str) -> Result<Option<ShellCommand>> {
+    let statement = line.trim();
+    if statement.is_empty() || statement.starts_with("--") || statement.starts_with('#') {
+        return Ok(None);
+    }
+    let statement = statement.trim_end_matches(';').trim();
+    if statement.is_empty() {
+        return Ok(None);
+    }
+    let upper = statement.to_ascii_uppercase();
+
+    if upper == "EXIT" || upper == "QUIT" {
+        return Ok(Some(ShellCommand::Exit));
+    }
+    if upper == "COMPACT INTO NONEXISTENCE" {
+        return Ok(Some(ShellCommand::CompactIntoNonexistence));
+    }
+    if upper == "VACUUM MEANING" {
+        return Ok(Some(ShellCommand::VacuumMeaning));
+    }
+    if let Some(rest) = statement.strip_prefix("PUT ") {
+        let Some((key, value)) = rest.trim().split_once(char::is_whitespace) else {
+            bail!("PUT requires a key and value");
+        };
+        return Ok(Some(ShellCommand::Put {
+            key: key.to_string(),
+            value: parse_shell_value(value.trim())?,
+        }));
+    }
+    if let Some(rest) = statement.strip_prefix("GET ") {
+        let key = rest.trim();
+        if key.is_empty() {
+            bail!("GET requires a key");
+        }
+        return Ok(Some(ShellCommand::Get {
+            key: key.to_string(),
+        }));
+    }
+    if let Some(rest) = statement.strip_prefix("EXPLAIN GET ") {
+        let key = rest.trim();
+        if key.is_empty() {
+            bail!("EXPLAIN GET requires a key");
+        }
+        return Ok(Some(ShellCommand::ExplainGet {
+            key: key.to_string(),
+        }));
+    }
+
+    bail!("unsupported shell command: {statement}");
+}
+
+fn parse_shell_value(value: &str) -> Result<Vec<u8>> {
+    if value.is_empty() {
+        bail!("value must not be empty");
+    }
+    if let Some(unquoted) = strip_matching_quotes(value, '\'') {
+        return Ok(unquoted.as_bytes().to_vec());
+    }
+    if let Some(unquoted) = strip_matching_quotes(value, '"') {
+        return Ok(unquoted.as_bytes().to_vec());
+    }
+    Ok(value.as_bytes().to_vec())
+}
+
+fn strip_matching_quotes(value: &str, quote: char) -> Option<&str> {
+    value
+        .strip_prefix(quote)
+        .and_then(|value| value.strip_suffix(quote))
+}
+
+async fn plan_all(db: &PiLsmDb, plan_options: &PlanOptions) -> Result<VacuumAllReport> {
+    let mut keys = Vec::new();
+    let mut envelopes = db.scan_envelopes::<Vec<u8>, _>(Vec::<u8>::new()..).await?;
+    while let Some(kv) = envelopes.next().await? {
+        keys.push(kv.key);
+    }
+
+    let mut report = VacuumAllReport::default();
+    for key in keys {
+        let rewrite = db.plan_key(&key, plan_options.clone()).await?;
+        report.visited += 1;
+        match rewrite.status {
+            RewriteStatus::Rewritten => report.rewritten += 1,
+            RewriteStatus::SkippedMissingKey | RewriteStatus::SkippedStaleSource => {
+                report.stale_or_missing += 1;
+            }
+            RewriteStatus::KeptAlreadyPlanned
+            | RewriteStatus::SkippedPlanningFailed
+            | RewriteStatus::SkippedNotImproved => report.kept += 1,
+        }
+    }
+
+    Ok(report)
 }
 
 async fn vacuum_all(
@@ -1266,6 +1410,41 @@ fn print_bench_row(result: &BenchResult) {
     );
 }
 
+fn print_rewrite_all_report(report: &VacuumAllReport) {
+    println!("visited: {}", report.visited);
+    println!("rewritten: {}", report.rewritten);
+    println!("kept: {}", report.kept);
+    println!("stale_or_missing: {}", report.stale_or_missing);
+    println!("timed_out: {}", report.timed_out);
+}
+
+fn print_explain(explain: &ExplainValue) {
+    println!("storage_class: {:?}", explain.storage_class);
+    println!("logical_user_bytes: {}", explain.logical_user_bytes);
+    println!("physical_value_bytes: {}", explain.physical_value_bytes);
+    println!("plan_metadata_bytes: {}", explain.plan_metadata_bytes);
+    println!("chunks: {}", explain.chunks);
+    println!("longest_natural_run: {}", explain.longest_natural_run);
+    println!("literal_bytes: {}", explain.literal_bytes);
+    match explain.average_chunk_len {
+        Some(len) => println!("average_chunk_len: {len:.2}"),
+        None => println!("average_chunk_len: undefined"),
+    }
+    println!(
+        "philosophical_user_value_bytes_stored: {}",
+        explain.philosophical_user_value_bytes_stored
+    );
+    println!(
+        "philosophical_compression_ratio: {}",
+        philosophical_compression_ratio(explain.philosophical_compression_ratio)
+    );
+    println!("purity: {:?}", explain.purity);
+    match explain.metadata_amplification_ratio {
+        Some(ratio) => println!("metadata_amplification: {ratio:.2}x"),
+        None => println!("metadata_amplification: undefined"),
+    }
+}
+
 fn optional_u128(value: Option<u128>) -> String {
     value.map_or_else(|| "-".to_string(), |value| value.to_string())
 }
@@ -1781,6 +1960,37 @@ mod tests {
         assert_eq!(
             metric_philosophical_ratio(PhilosophicalCompressionRatio::Undefined),
             "NaN, but smug"
+        );
+    }
+
+    #[test]
+    fn shell_parser_accepts_spec_commands() {
+        assert_eq!(
+            parse_shell_command(r#"PUT invoice:123 '{"total":49.99}';"#).unwrap(),
+            Some(ShellCommand::Put {
+                key: "invoice:123".to_string(),
+                value: br#"{"total":49.99}"#.to_vec()
+            })
+        );
+        assert_eq!(
+            parse_shell_command("GET invoice:123;").unwrap(),
+            Some(ShellCommand::Get {
+                key: "invoice:123".to_string()
+            })
+        );
+        assert_eq!(
+            parse_shell_command("EXPLAIN GET invoice:123;").unwrap(),
+            Some(ShellCommand::ExplainGet {
+                key: "invoice:123".to_string()
+            })
+        );
+        assert_eq!(
+            parse_shell_command("COMPACT INTO NONEXISTENCE;").unwrap(),
+            Some(ShellCommand::CompactIntoNonexistence)
+        );
+        assert_eq!(
+            parse_shell_command("VACUUM MEANING;").unwrap(),
+            Some(ShellCommand::VacuumMeaning)
         );
     }
 }

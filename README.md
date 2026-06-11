@@ -43,6 +43,19 @@ cargo run -q --bin pilsmer -- explain /tmp/pilsmer-demo/db invoice:123
 cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123
 ```
 
+SQL-like demo input is available through `shell`:
+
+```sh
+cat <<'SQL' | cargo run -q --bin pilsmer -- shell /tmp/pilsmer-demo/db
+PUT invoice:123 '{"total":49.99,"status":"paid"}';
+GET invoice:123;
+EXPLAIN GET invoice:123;
+COMPACT INTO NONEXISTENCE;
+EXPLAIN GET invoice:123;
+VACUUM MEANING;
+SQL
+```
+
 `plan-key` is the deterministic single-key demo path. It rewrites the latest
 value through the wrapper after checking that the source envelope has not
 changed.
@@ -96,6 +109,7 @@ pilsmer explain <db> <key> [--philosophical]
 pilsmer plan-key <db> <key>
 pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
 pilsmer metrics <db>
+pilsmer shell <db>
 pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
 pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite|--against-common-sense]
 ```
