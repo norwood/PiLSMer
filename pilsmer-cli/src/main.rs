@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use pilsmer_core::{
-    pi_hex_fraction_prefix_stream, ByteStream, PhilosophicalCompressionRatio, PlanOptions, Planner,
-    Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions, StreamRegistry,
-    PI_HEX_FRACTION_PREFIX_BYTES,
+    pi_hex_fraction_prefix_stream, ByteStream, PhilosophicalCompressionRatio, PlanCodec,
+    PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex, StreamIndexOptions,
+    StreamRegistry, PI_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
     run_compactor_with_options, CompactionMode, PiLsmCompactionFilterSupplier,
@@ -28,6 +28,8 @@ struct Cli {
     prefix_bytes: Option<u64>,
     #[arg(long, default_value_t = 3)]
     max_k: usize,
+    #[arg(long, value_enum, default_value_t = CliPlanCodec::CompactBinary)]
+    plan_codec: CliPlanCodec,
     #[arg(long)]
     allow_literals: bool,
     #[command(subcommand)]
@@ -95,6 +97,21 @@ enum StreamKind {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliPlanCodec {
+    CompactBinary,
+    CeremonialCbor,
+}
+
+impl From<CliPlanCodec> for PlanCodec {
+    fn from(value: CliPlanCodec) -> Self {
+        match value {
+            CliPlanCodec::CompactBinary => PlanCodec::CompactBinary,
+            CliPlanCodec::CeremonialCbor => PlanCodec::CeremonialCbor,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliCompactionMode {
     Disabled,
     Normal,
@@ -128,6 +145,7 @@ async fn main() -> Result<()> {
             .prefix_bytes
             .unwrap_or_else(|| default_prefix_bytes(stream_kind)),
         max_k: cli.max_k,
+        plan_codec: cli.plan_codec.into(),
         allow_literals: cli.allow_literals,
         ..PlanOptions::default()
     };
@@ -219,6 +237,7 @@ async fn main() -> Result<()> {
             }
             if humiliation == Some(Humiliation::Maximum) {
                 compact_plan_options.max_k = 1;
+                compact_plan_options.plan_codec = PlanCodec::CeremonialCbor;
             }
             let (object_store, db_path) = open_local_store(&path)?;
             let runtime = build_runtime(&compact_plan_options, stream_kind).await?;

@@ -251,6 +251,15 @@ impl ReconstructionPlan {
                 }
             }
         }
+        if self.plan_codec == PlanCodec::CeremonialCbor {
+            let footer = ceremonial_footer(
+                self.logical_len,
+                self.streams.len() as u64,
+                self.chunks.len() as u64,
+            );
+            put_varint(&mut out, footer.len() as u64);
+            out.extend_from_slice(&footer);
+        }
         out
     }
 
@@ -343,6 +352,16 @@ impl ReconstructionPlan {
             chunks.push(chunk);
         }
 
+        if plan_codec == PlanCodec::CeremonialCbor {
+            let footer_len = cursor.read_varint()?;
+            let footer = cursor.read_exact(checked_usize(footer_len, "ceremonial_footer_len")?)?;
+            let expected_footer =
+                ceremonial_footer(logical_len, streams.len() as u64, chunks.len() as u64);
+            if footer != expected_footer {
+                return Err(PiLsmError::InvalidPlan("invalid ceremonial footer"));
+            }
+        }
+
         if !cursor.is_empty() {
             return Err(PiLsmError::InvalidPlan("trailing bytes"));
         }
@@ -360,5 +379,120 @@ impl ReconstructionPlan {
             streams,
             chunks,
         })
+    }
+}
+
+fn ceremonial_footer(logical_len: u64, stream_count: u64, chunk_count: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_cbor_map(&mut out, 6);
+    put_cbor_text(&mut out, "codec");
+    put_cbor_text(&mut out, "ceremonial-cbor");
+    put_cbor_text(&mut out, "purpose");
+    put_cbor_text(&mut out, "metadata regret");
+    put_cbor_text(&mut out, "claim");
+    put_cbor_text(&mut out, "your data is merely located");
+    put_cbor_text(&mut out, "logical_len");
+    put_cbor_u64(&mut out, logical_len);
+    put_cbor_text(&mut out, "streams");
+    put_cbor_u64(&mut out, stream_count);
+    put_cbor_text(&mut out, "chunks");
+    put_cbor_u64(&mut out, chunk_count);
+    out
+}
+
+fn put_cbor_map(out: &mut Vec<u8>, len: u64) {
+    put_cbor_major(out, 5, len);
+}
+
+fn put_cbor_text(out: &mut Vec<u8>, text: &str) {
+    put_cbor_major(out, 3, text.len() as u64);
+    out.extend_from_slice(text.as_bytes());
+}
+
+fn put_cbor_u64(out: &mut Vec<u8>, value: u64) {
+    put_cbor_major(out, 0, value);
+}
+
+fn put_cbor_major(out: &mut Vec<u8>, major: u8, value: u64) {
+    let head = major << 5;
+    match value {
+        0..=23 => out.push(head | value as u8),
+        24..=0xff => {
+            out.push(head | 24);
+            out.push(value as u8);
+        }
+        0x100..=0xffff => {
+            out.push(head | 25);
+            out.extend_from_slice(&(value as u16).to_be_bytes());
+        }
+        0x1_0000..=0xffff_ffff => {
+            out.push(head | 26);
+            out.extend_from_slice(&(value as u32).to_be_bytes());
+        }
+        _ => {
+            out.push(head | 27);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::envelope::DecodeLimits;
+
+    #[test]
+    fn ceremonial_codec_roundtrips_and_inflates_payload() {
+        let compact = test_plan(PlanCodec::CompactBinary);
+        let ceremonial = test_plan(PlanCodec::CeremonialCbor);
+
+        let compact_payload = compact.encode_payload();
+        let ceremonial_payload = ceremonial.encode_payload();
+        assert!(ceremonial_payload.len() > compact_payload.len());
+
+        assert_eq!(
+            ReconstructionPlan::decode_payload(
+                &ceremonial_payload,
+                ceremonial.logical_hash,
+                &DecodeLimits::default()
+            )
+            .unwrap(),
+            ceremonial
+        );
+    }
+
+    #[test]
+    fn ceremonial_codec_rejects_bad_footer() {
+        let plan = test_plan(PlanCodec::CeremonialCbor);
+        let mut payload = plan.encode_payload();
+        let last = payload.last_mut().unwrap();
+        *last ^= 1;
+
+        let err = ReconstructionPlan::decode_payload(
+            &payload,
+            plan.logical_hash,
+            &DecodeLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, PiLsmError::InvalidPlan("invalid ceremonial footer"));
+    }
+
+    fn test_plan(plan_codec: PlanCodec) -> ReconstructionPlan {
+        ReconstructionPlan {
+            logical_len: 3,
+            logical_hash: LogicalHash::new(LogicalHashKind::Blake3_128, b"abc"),
+            planner_version: 1,
+            plan_codec,
+            streams: vec![PlanStream {
+                id: StreamId::Sha256CounterV1 { seed: [0_u8; 32] },
+                fingerprint: [1_u8; 32],
+            }],
+            chunks: vec![ChunkRef::Located {
+                stream_ix: 0,
+                offset: 42,
+                len: 3,
+                transform: ChunkTransform::Identity,
+            }],
+        }
     }
 }

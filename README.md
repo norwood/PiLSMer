@@ -70,8 +70,9 @@ For maximum embarrassment:
 cargo run -q --bin pilsmer -- compact /tmp/pilsmer-demo/db --humiliation maximum
 ```
 
-That forces pure raw-to-plan compaction and sets `max_k = 1`; it fails if the
-value cannot be represented without literal bytes.
+That forces pure raw-to-plan compaction, sets `max_k = 1`, and uses the
+ceremonial plan codec; it fails if the value cannot be represented without
+literal bytes.
 
 ## CLI
 
@@ -91,6 +92,7 @@ Global planning options:
 ```sh
 --prefix-bytes <bytes>
 --max-k <k>
+--plan-codec compact-binary|ceremonial-cbor
 --allow-literals
 --stream sha256-counter|pi-prefix
 ```
