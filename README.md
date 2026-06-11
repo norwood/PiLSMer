@@ -111,6 +111,7 @@ pilsmer plan-key <db> <key>
 pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
 pilsmer metrics <db>
 pilsmer shell <db>
+pilsmer migrate <db> --constant pi --to e
 pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
 pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite|--against-common-sense]
 ```
@@ -130,6 +131,9 @@ Global options:
 rejects it because literal chunks are still user bytes.
 Use `--disable-embedded-compactor` on writer commands when you want the
 standalone `compact` command to be the only compactor in the demo.
+
+`migrate --constant <from> --to <to>` replans existing values from one checked-in
+constant prefix to another, for example pi to e.
 
 `bench` writes into a new directory and refuses to reuse an existing path. It
 compares plain SlateDB values, PiLSMer raw envelopes, compact binary plans,

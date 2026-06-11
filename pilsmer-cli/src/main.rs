@@ -90,6 +90,13 @@ enum Command {
     Shell {
         path: PathBuf,
     },
+    Migrate {
+        path: PathBuf,
+        #[arg(long, value_enum)]
+        constant: ConstantKind,
+        #[arg(long, value_enum)]
+        to: ConstantKind,
+    },
     Compact {
         path: PathBuf,
         #[arg(long, default_value_t = 1000)]
@@ -132,6 +139,13 @@ enum StreamKind {
     PiPrefix,
     EPrefix,
     Sqrt2Prefix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ConstantKind {
+    Pi,
+    E,
+    Sqrt2,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -211,11 +225,10 @@ impl BenchWorkload {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let stream_kind = cli.stream;
+    let prefix_bytes = cli.prefix_bytes;
     let disable_embedded_compactor = cli.disable_embedded_compactor;
     let plan_options = PlanOptions {
-        max_prefix_len: cli
-            .prefix_bytes
-            .unwrap_or_else(|| default_prefix_bytes(stream_kind)),
+        max_prefix_len: prefix_bytes.unwrap_or_else(|| default_prefix_bytes(stream_kind)),
         max_k: cli.max_k,
         plan_codec: cli.plan_codec.into(),
         allow_literals: cli.allow_literals,
@@ -354,6 +367,22 @@ async fn main() -> Result<()> {
             run_shell(&db, &plan_options).await?;
             db.close().await?;
         }
+        Command::Migrate { path, constant, to } => {
+            if constant == to {
+                bail!("--constant and --to must differ");
+            }
+            let mut migrate_options = plan_options.clone();
+            if prefix_bytes.is_none() {
+                migrate_options.max_prefix_len = default_constant_prefix_bytes(to);
+            }
+            let (object_store, db_path) = open_local_store(&path)?;
+            let runtime = build_migration_runtime(&migrate_options, constant, to).await?;
+            let db = PiLsmDb::open(db_path, object_store, runtime.opts).await?;
+            let report = migrate_all(&db, &migrate_options).await?;
+            db.flush().await?;
+            print_rewrite_all_report(&report);
+            db.close().await?;
+        }
         Command::Compact {
             path,
             run_ms,
@@ -439,6 +468,14 @@ fn default_prefix_bytes(stream_kind: StreamKind) -> u64 {
         StreamKind::PiPrefix => PI_HEX_FRACTION_PREFIX_BYTES as u64,
         StreamKind::EPrefix => E_HEX_FRACTION_PREFIX_BYTES as u64,
         StreamKind::Sqrt2Prefix => SQRT2_HEX_FRACTION_PREFIX_BYTES as u64,
+    }
+}
+
+fn default_constant_prefix_bytes(kind: ConstantKind) -> u64 {
+    match kind {
+        ConstantKind::Pi => PI_HEX_FRACTION_PREFIX_BYTES as u64,
+        ConstantKind::E => E_HEX_FRACTION_PREFIX_BYTES as u64,
+        ConstantKind::Sqrt2 => SQRT2_HEX_FRACTION_PREFIX_BYTES as u64,
     }
 }
 
@@ -612,6 +649,31 @@ async fn plan_all(db: &PiLsmDb, plan_options: &PlanOptions) -> Result<VacuumAllR
     let mut report = VacuumAllReport::default();
     for key in keys {
         let rewrite = db.plan_key(&key, plan_options.clone()).await?;
+        report.visited += 1;
+        match rewrite.status {
+            RewriteStatus::Rewritten => report.rewritten += 1,
+            RewriteStatus::SkippedMissingKey | RewriteStatus::SkippedStaleSource => {
+                report.stale_or_missing += 1;
+            }
+            RewriteStatus::KeptAlreadyPlanned
+            | RewriteStatus::SkippedPlanningFailed
+            | RewriteStatus::SkippedNotImproved => report.kept += 1,
+        }
+    }
+
+    Ok(report)
+}
+
+async fn migrate_all(db: &PiLsmDb, plan_options: &PlanOptions) -> Result<VacuumAllReport> {
+    let mut keys = Vec::new();
+    let mut envelopes = db.scan_envelopes::<Vec<u8>, _>(Vec::<u8>::new()..).await?;
+    while let Some(kv) = envelopes.next().await? {
+        keys.push(kv.key);
+    }
+
+    let mut report = VacuumAllReport::default();
+    for key in keys {
+        let rewrite = db.replan_key(&key, plan_options.clone()).await?;
         report.visited += 1;
         match rewrite.status {
             RewriteStatus::Rewritten => report.rewritten += 1,
@@ -1914,6 +1976,44 @@ async fn build_runtime(plan_options: &PlanOptions, stream_kind: StreamKind) -> R
         opts: PiLsmOptions::new(registry.clone(), planner.clone()),
         supplier: CompactionSupplierBuilder { registry, planner },
     })
+}
+
+async fn build_migration_runtime(
+    plan_options: &PlanOptions,
+    from: ConstantKind,
+    to: ConstantKind,
+) -> Result<Runtime> {
+    let source = constant_stream(from, plan_options.max_prefix_len)?;
+    let target = constant_stream(to, plan_options.max_prefix_len)?;
+    let mut registry = StreamRegistry::new();
+    registry.register(source);
+    registry.register(target.clone());
+    let index = Arc::new(
+        StreamIndex::build(
+            target,
+            StreamIndexOptions {
+                max_prefix_len: plan_options.max_prefix_len,
+                max_k: plan_options.max_k,
+                max_index_memory_bytes: plan_options.max_index_memory_bytes,
+                max_offsets_per_kgram: plan_options.max_offsets_per_kgram,
+            },
+        )
+        .await?,
+    );
+    let planner = Planner::new(vec![index], registry.clone(), plan_options.clone());
+    Ok(Runtime {
+        opts: PiLsmOptions::new(registry.clone(), planner.clone()),
+        supplier: CompactionSupplierBuilder { registry, planner },
+    })
+}
+
+fn constant_stream(kind: ConstantKind, prefix_bytes: u64) -> Result<Arc<dyn ByteStream>> {
+    let stream: Arc<dyn ByteStream> = match kind {
+        ConstantKind::Pi => Arc::new(pi_hex_fraction_prefix_stream(prefix_bytes)?),
+        ConstantKind::E => Arc::new(e_hex_fraction_prefix_stream(prefix_bytes)?),
+        ConstantKind::Sqrt2 => Arc::new(sqrt2_hex_fraction_prefix_stream(prefix_bytes)?),
+    };
+    Ok(stream)
 }
 
 fn split_db_path(path: &Path) -> Result<(PathBuf, String)> {

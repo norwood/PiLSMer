@@ -854,6 +854,83 @@ impl PiLsmDb {
         Ok(report)
     }
 
+    pub async fn replan_key<K, O>(&self, key: K, options: O) -> Result<PlanReport>
+    where
+        K: AsRef<[u8]> + Send,
+        O: Into<VacuumOptions>,
+    {
+        let options = options.into();
+        let key_bytes = key.as_ref().to_vec();
+        let Some((source_hash, envelope, old_encoded_len)) = ({
+            let _guard = self.lock_key(&key_bytes).await;
+            self.read_current_envelope(&key_bytes).await?
+        }) else {
+            return Ok(PlanReport::missing());
+        };
+
+        let (logical_bytes, old_chunk_count) = match envelope {
+            ValueEnvelope::Raw(bytes) => (bytes, None),
+            ValueEnvelope::Plan(plan) => {
+                let chunk_count = plan.chunks.len();
+                let logical = self
+                    .reconstruct_plan(
+                        &plan,
+                        options
+                            .max_reconstruct_bytes
+                            .unwrap_or(self.max_reconstruct_bytes),
+                    )
+                    .await?;
+                (logical, Some(chunk_count))
+            }
+        };
+
+        let new_plan = match self
+            .plan_bytes_with_options(&logical_bytes, options.plan_options)
+            .await
+        {
+            Ok(plan) => plan,
+            Err(PiLsmError::PlanningFailed(_)) => {
+                self.counters.increment_entropy_excuses();
+                return Ok(PlanReport {
+                    status: RewriteStatus::SkippedPlanningFailed,
+                    source_envelope_hash: Some(source_hash),
+                    old_envelope_bytes: Some(old_encoded_len),
+                    new_envelope_bytes: None,
+                    old_chunk_count,
+                    new_chunk_count: None,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let new_chunk_count = new_plan.chunks.len();
+        let encoded_plan = ValueEnvelope::Plan(new_plan).encode();
+        if encoded_plan.len() == old_encoded_len && envelope_hash(&encoded_plan) == source_hash {
+            return Ok(PlanReport {
+                status: RewriteStatus::SkippedNotImproved,
+                source_envelope_hash: Some(source_hash),
+                old_envelope_bytes: Some(old_encoded_len),
+                new_envelope_bytes: Some(encoded_plan.len()),
+                old_chunk_count,
+                new_chunk_count: Some(new_chunk_count),
+            });
+        }
+
+        self.write_if_source_unchanged(
+            key_bytes,
+            source_hash,
+            encoded_plan,
+            PlanReport {
+                status: RewriteStatus::Rewritten,
+                source_envelope_hash: Some(source_hash),
+                old_envelope_bytes: Some(old_encoded_len),
+                new_envelope_bytes: None,
+                old_chunk_count,
+                new_chunk_count: Some(new_chunk_count),
+            },
+        )
+        .await
+    }
+
     async fn logical_bytes(
         &self,
         envelope: ValueEnvelope,
