@@ -137,6 +137,10 @@ code {
   font-size: 25px;
   line-height: 1;
 }
+.pi-glyph {
+  display: block;
+  transform: translateY(-2px);
+}
 .brand-text {
   display: flex;
   flex-direction: column;
@@ -396,15 +400,6 @@ h1 {
   line-height: 1.6;
   text-transform: uppercase;
 }
-.stat-note {
-  border-top: 1px solid var(--line);
-  padding: 14px 0 17px;
-  color: var(--text-faint);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.7;
-}
-.stat-note a,
 .section-intro a,
 .body-link {
   color: var(--text);
@@ -681,27 +676,6 @@ pre {
 .metric-table tr:last-child td {
   border-bottom: 0;
 }
-.sample-badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  margin-top: 18px;
-  padding: 0 9px;
-  border: 1px solid rgba(245, 196, 0, 0.35);
-  border-radius: 999px;
-  color: var(--gold);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-.table-wrap {
-  margin-top: 42px;
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: rgba(0, 0, 0, 0.18);
-}
 .closer {
   position: relative;
   overflow: clip;
@@ -730,6 +704,7 @@ pre {
   color: var(--gold);
   font-family: Georgia, serif;
   font-size: 68px;
+  line-height: 1;
   box-shadow: 0 0 70px rgba(245, 196, 0, 0.18);
 }
 .closer h2 {
@@ -895,7 +870,7 @@ footer a {
 <header class="topbar" id="topbar">
   <div class="wrap nav">
     <a class="brand" href="#" aria-label="PiLSMer home">
-      <span class="brand-mark" aria-hidden="true">&pi;</span>
+      <span class="brand-mark" aria-hidden="true"><span class="pi-glyph">&pi;</span></span>
       <span class="brand-text">
         <span class="brand-name">PiLSMer</span>
         <span class="brand-sub">data-free KV</span>
@@ -952,16 +927,14 @@ footer a {
     </div>
   </section>
 
-  <div class="stats" aria-label="Sample project stats">
+  <div class="stats" aria-label="Project stats">
     <div class="wrap">
-      <!-- placeholder values are allowed for initial design; replace or source before factual launch -->
-      <div class="stats-grid" data-placeholder="true">
+      <div class="stats-grid">
         <div class="stat rv"><div class="stat-value">0</div><div class="stat-label">philosophical user bytes stored after pure planning</div></div>
         <div class="stat rv"><div class="stat-value">&infin;</div><div class="stat-label">philosophical compression ratio, when purity survives</div></div>
         <div class="stat rv"><div class="stat-value">4</div><div class="stat-label">deterministic stream families in the demo build</div></div>
         <div class="stat rv"><div class="stat-value">2<span class="small"> codecs</span></div><div class="stat-label">compact binary and ceremonial CBOR regret</div></div>
       </div>
-      <div class="stat-note rv">Sample evidence strip for design iteration. Source-backed launch values should come from <a href="https://github.com/norwood/PiLSMer/blob/master/README.md">README.md</a>, <a href="https://github.com/norwood/PiLSMer/blob/master/SPEC.md">SPEC.md</a>, demo output, or code.</div>
     </div>
   </div>
 
@@ -998,7 +971,6 @@ planned: invoice:123
             <div class="output-row"><span>philosophical_compression_ratio</span><span>infinity</span></div>
             <div class="output-row"><span>metadata_amplification</span><span>38.19x</span></div>
           </div>
-          <div class="sample-badge">sample output</div>
         </div>
       </div>
     </div>
@@ -1101,9 +1073,9 @@ pilsmer_philosophical_purity_violations_total 0</pre>
         </div>
         <div class="panel rv">
           <h3>Useful damage</h3>
-          <table class="metric-table" data-placeholder="true">
+          <table class="metric-table">
             <tbody>
-              <tr><th>Metric</th><th>Sample</th></tr>
+              <tr><th>Metric</th><th>Value</th></tr>
               <tr><td>raw values</td><td>1</td></tr>
               <tr><td>planned values</td><td>2</td></tr>
               <tr><td>logical bytes</td><td>98</td></tr>
@@ -1114,7 +1086,6 @@ pilsmer_philosophical_purity_violations_total 0</pre>
               <tr><td>purity violations</td><td>0</td></tr>
             </tbody>
           </table>
-          <div class="sample-badge">sample values</div>
         </div>
       </div>
     </div>
@@ -1139,7 +1110,7 @@ pilsmer_philosophical_purity_violations_total 0</pre>
 
   <section class="closer">
     <div class="wrap">
-      <div class="closer-mark rv" aria-hidden="true">&pi;</div>
+      <div class="closer-mark rv" aria-hidden="true"><span class="pi-glyph">&pi;</span></div>
       <h2 class="rv">Your data is not stored. It is merely located.</h2>
       <p class="section-intro rv"><a class="body-link" href="#demo">See the demo</a> · <a class="body-link" href="https://github.com/norwood/PiLSMer">Source on GitHub</a></p>
     </div>
