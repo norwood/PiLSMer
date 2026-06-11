@@ -189,6 +189,32 @@ pub struct PlanReport {
     pub new_chunk_count: Option<usize>,
 }
 
+pub type VacuumReport = PlanReport;
+
+#[derive(Clone, Debug)]
+pub struct VacuumOptions {
+    pub plan_options: PlanOptions,
+    pub max_reconstruct_bytes: Option<u64>,
+}
+
+impl Default for VacuumOptions {
+    fn default() -> Self {
+        Self {
+            plan_options: PlanOptions::default(),
+            max_reconstruct_bytes: None,
+        }
+    }
+}
+
+impl From<PlanOptions> for VacuumOptions {
+    fn from(plan_options: PlanOptions) -> Self {
+        Self {
+            plan_options,
+            max_reconstruct_bytes: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PiLsmKeyValue {
     pub key: Bytes,
@@ -569,10 +595,12 @@ impl PiLsmDb {
         .await
     }
 
-    pub async fn vacuum_meaning<K>(&self, key: K, opts: PlanOptions) -> Result<PlanReport>
+    pub async fn vacuum_meaning<K, O>(&self, key: K, options: O) -> Result<VacuumReport>
     where
         K: AsRef<[u8]> + Send,
+        O: Into<VacuumOptions>,
     {
+        let options = options.into();
         let key_bytes = key.as_ref().to_vec();
         let Some((source_hash, envelope, old_encoded_len)) = ({
             let _guard = self.lock_key(&key_bytes).await;
@@ -582,15 +610,24 @@ impl PiLsmDb {
         };
 
         let ValueEnvelope::Plan(old_plan) = envelope else {
-            return self.plan_key(key_bytes, opts).await;
+            return self.plan_key(key_bytes, options.plan_options).await;
         };
 
         let old_chunk_count = old_plan.chunks.len();
         let logical_bytes = self
             .reconstructor
-            .reconstruct_with_limit(&old_plan, self.max_reconstruct_bytes)
+            .reconstruct_with_limit(
+                &old_plan,
+                options
+                    .max_reconstruct_bytes
+                    .unwrap_or(self.max_reconstruct_bytes),
+            )
             .await?;
-        let new_plan = match self.planner.plan_with_options(&logical_bytes, opts).await {
+        let new_plan = match self
+            .planner
+            .plan_with_options(&logical_bytes, options.plan_options)
+            .await
+        {
             Ok(plan) => plan,
             Err(PiLsmError::PlanningFailed(_)) => {
                 return Ok(PlanReport {
@@ -1012,6 +1049,27 @@ mod tests {
             Err(PiLsmDbError::Core(PiLsmError::DecodeLimitExceeded(
                 "max_reconstruct_bytes"
             )))
+        ));
+
+        assert!(matches!(
+            db.vacuum_meaning(b"a", VacuumOptions::default()).await,
+            Err(PiLsmDbError::Core(PiLsmError::DecodeLimitExceeded(
+                "max_reconstruct_bytes"
+            )))
+        ));
+        let report = db
+            .vacuum_meaning(
+                b"a",
+                VacuumOptions {
+                    plan_options: PlanOptions::default(),
+                    max_reconstruct_bytes: Some(3),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            report.status,
+            RewriteStatus::Rewritten | RewriteStatus::SkippedNotImproved
         ));
 
         let mut raw_iter = db

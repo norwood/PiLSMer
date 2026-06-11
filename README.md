@@ -112,6 +112,8 @@ return envelopes, not user values.
 
 Normal `put` stores a raw envelope. `put_with_options` can create an immediate
 plan only for development and tests.
+`vacuum_meaning` accepts `VacuumOptions` for per-run planning and reconstruction
+limits.
 
 After any successful `put`, `plan-key`, `vacuum-meaning`, or compaction-filter
 rewrite, `get` should return the original logical bytes unless the key was
