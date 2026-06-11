@@ -447,6 +447,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filter_keeps_tombstones_and_merges() {
+        let mut filter = filter_for(b"abcdef", CompactionMode::ForceRawToPlan, true, true).await;
+        let tombstone = RowEntry {
+            key: Bytes::from_static(b"k1"),
+            value: ValueDeletable::Tombstone,
+            seq: 1,
+            create_ts: None,
+            expire_ts: None,
+        };
+        let merge = RowEntry {
+            key: Bytes::from_static(b"k2"),
+            value: ValueDeletable::Merge(Bytes::from_static(b"merge operand")),
+            seq: 1,
+            create_ts: None,
+            expire_ts: None,
+        };
+
+        assert_eq!(
+            filter.filter(&tombstone).await.unwrap(),
+            CompactionFilterDecision::Keep
+        );
+        assert_eq!(
+            filter.filter(&merge).await.unwrap(),
+            CompactionFilterDecision::Keep
+        );
+        assert_eq!(filter.stats.tombstones_or_merges_kept, 2);
+    }
+
+    #[tokio::test]
+    async fn corrupt_envelopes_are_kept_unless_strict() {
+        let mut filter = filter_for(b"abcdef", CompactionMode::Normal, true, true).await;
+        let entry = RowEntry {
+            key: Bytes::from_static(b"k"),
+            value: ValueDeletable::Value(Bytes::from_static(b"not a PLSM envelope")),
+            seq: 1,
+            create_ts: None,
+            expire_ts: None,
+        };
+
+        assert_eq!(
+            filter.filter(&entry).await.unwrap(),
+            CompactionFilterDecision::Keep
+        );
+        assert_eq!(filter.stats.corrupt_or_unknown_kept, 1);
+
+        filter.strict_envelopes = true;
+        assert!(filter.filter(&entry).await.is_err());
+        assert_eq!(filter.stats.errors, 1);
+    }
+
+    #[tokio::test]
     async fn snapshot_protected_entries_are_kept() {
         let mut filter = filter_for(b"abcdef", CompactionMode::Normal, true, true).await;
         filter.context.retention_min_seq = Some(10);
