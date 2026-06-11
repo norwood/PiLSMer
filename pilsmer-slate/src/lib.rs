@@ -14,7 +14,7 @@ use pilsmer_core::{
     StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
-use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+use slatedb::config::{CompactorOptions, Settings, SizeTieredCompactionSchedulerOptions};
 use slatedb::object_store::path::Path as ObjectStorePath;
 use slatedb::object_store::ObjectStore;
 use slatedb::{CompactorBuilder, Db, DbIterator};
@@ -133,6 +133,7 @@ pub struct PiLsmOptions {
     pub decode_limits: DecodeLimits,
     pub max_reconstruct_bytes: u64,
     pub reconstruction_cache_bytes: u64,
+    pub disable_embedded_compactor: bool,
 }
 
 impl PiLsmOptions {
@@ -143,6 +144,7 @@ impl PiLsmOptions {
             decode_limits: DecodeLimits::default(),
             max_reconstruct_bytes: 64 * 1024 * 1024,
             reconstruction_cache_bytes: 0,
+            disable_embedded_compactor: false,
         }
     }
 }
@@ -488,7 +490,18 @@ impl PiLsmDb {
     where
         P: Into<slatedb::object_store::path::Path>,
     {
-        let inner = Db::open(path, object_store).await?;
+        let path = path.into();
+        let inner = if opts.disable_embedded_compactor {
+            Db::builder(path, object_store)
+                .with_settings(Settings {
+                    compactor_options: None,
+                    ..Settings::default()
+                })
+                .build()
+                .await?
+        } else {
+            Db::open(path, object_store).await?
+        };
         Ok(Self::from_db(inner, opts))
     }
 
@@ -1256,6 +1269,48 @@ mod tests {
         assert_eq!(db.get(b"k").await.unwrap(), None);
         assert!(db.get_envelope(b"k").await.unwrap().is_none());
         assert!(db.explain(b"k").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn can_open_with_embedded_compactor_disabled() {
+        let stream: Arc<dyn ByteStream> = Arc::new(PrefixByteStream::new(
+            StreamId::PiHexFractionPrefixV1 {
+                digest: [8_u8; 32],
+                bytes: 6,
+            },
+            Bytes::from_static(b"abcdef"),
+        ));
+        let mut registry = StreamRegistry::new();
+        registry.register(stream.clone());
+        let index = Arc::new(
+            StreamIndex::build(
+                stream,
+                StreamIndexOptions {
+                    max_prefix_len: 6,
+                    max_k: 3,
+                    max_index_memory_bytes: 1024,
+                    max_offsets_per_kgram: 4,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let planner = Planner::new(vec![index], registry.clone(), PlanOptions::default());
+        let mut opts = PiLsmOptions::new(registry, planner);
+        opts.disable_embedded_compactor = true;
+
+        let db = PiLsmDb::open(
+            "pilsmer-no-embedded-compactor",
+            Arc::new(InMemory::new()),
+            opts,
+        )
+        .await
+        .unwrap();
+        db.put(b"k", b"abc").await.unwrap();
+        assert_eq!(
+            db.get(b"k").await.unwrap(),
+            Some(Bytes::from_static(b"abc"))
+        );
     }
 
     #[tokio::test]

@@ -100,7 +100,7 @@ pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
 pilsmer bench <db> [--workload sha256-stream|tiny-json|json-4k|random-64k|repeated-64k|uuid-heavy|all-bytes|tiny-png|png-256k] [--suite|--against-common-sense]
 ```
 
-Global planning options:
+Global options:
 
 ```sh
 --prefix-bytes <bytes>
@@ -108,10 +108,13 @@ Global planning options:
 --plan-codec compact-binary|ceremonial-cbor
 --allow-literals
 --stream sha256-counter|pi-prefix
+--disable-embedded-compactor
 ```
 
 `--allow-literals` is for development and tests. Forced compaction into plans
 rejects it because literal chunks are still user bytes.
+Use `--disable-embedded-compactor` on writer commands when you want the
+standalone `compact` command to be the only compactor in the demo.
 
 `bench` writes into a new directory and refuses to reuse an existing path. It
 compares plain SlateDB values, PiLSMer raw envelopes, compact binary plans,

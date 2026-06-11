@@ -41,6 +41,8 @@ struct Cli {
     plan_codec: CliPlanCodec,
     #[arg(long)]
     allow_literals: bool,
+    #[arg(long)]
+    disable_embedded_compactor: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -203,6 +205,7 @@ impl BenchWorkload {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let stream_kind = cli.stream;
+    let disable_embedded_compactor = cli.disable_embedded_compactor;
     let plan_options = PlanOptions {
         max_prefix_len: cli
             .prefix_bytes
@@ -215,18 +218,36 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init { path } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             db.close().await?;
         }
         Command::Put { path, key, file } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             let value = read_value(&file)?;
             db.put(key.as_bytes(), value).await?;
             db.flush().await?;
             db.close().await?;
         }
         Command::Get { path, key } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             let Some(value) = db.get(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
             };
@@ -234,7 +255,13 @@ async fn main() -> Result<()> {
             db.close().await?;
         }
         Command::Delete { path, key } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             db.delete(key.as_bytes()).await?;
             db.flush().await?;
             db.close().await?;
@@ -244,7 +271,13 @@ async fn main() -> Result<()> {
             key,
             philosophical: _,
         } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             let Some(explain) = db.explain(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
             };
@@ -275,7 +308,13 @@ async fn main() -> Result<()> {
             db.close().await?;
         }
         Command::PlanKey { path, key } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             let report = db.plan_key(key.as_bytes(), plan_options).await?;
             print_rewrite_status(report.status);
             db.flush().await?;
@@ -287,7 +326,13 @@ async fn main() -> Result<()> {
             all,
             budget,
         } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             match (all, key) {
                 (true, None) => {
                     let report = vacuum_all(&db, &plan_options, budget).await?;
@@ -308,7 +353,13 @@ async fn main() -> Result<()> {
             db.close().await?;
         }
         Command::Metrics { path } => {
-            let db = open_db(&path, &plan_options, stream_kind).await?;
+            let db = open_db_for_cli(
+                &path,
+                &plan_options,
+                stream_kind,
+                disable_embedded_compactor,
+            )
+            .await?;
             let metrics = db.metrics().await?;
             print_metrics(&metrics);
             db.close().await?;
@@ -1390,13 +1441,15 @@ fn philosophical_compression_ratio(value: PhilosophicalCompressionRatio) -> Stri
     }
 }
 
-async fn open_db(
+async fn open_db_for_cli(
     path: &Path,
     plan_options: &PlanOptions,
     stream_kind: StreamKind,
+    disable_embedded_compactor: bool,
 ) -> Result<PiLsmDb> {
     let (object_store, db_path) = open_local_store(path)?;
-    let runtime = build_runtime(plan_options, stream_kind).await?;
+    let mut runtime = build_runtime(plan_options, stream_kind).await?;
+    runtime.opts.disable_embedded_compactor = disable_embedded_compactor;
     Ok(PiLsmDb::open(db_path, object_store, runtime.opts).await?)
 }
 
