@@ -597,7 +597,7 @@ async fn run_bench(
     println!("value_size: {value_size}");
     println!("bench_workload: {}", case.workload.name());
     println!(
-        "workload\tput_ms\tplan_ms\tread_ms\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
+        "workload\tput_ms\tflush_ms\tput_p50_us\tput_p95_us\tplan_ms\tread_ms\tread_p50_us\tread_p95_us\tread_p99_us\tlogical_bytes\tphysical_value_bytes\tchunks\tmetadata_amp"
     );
     print_bench_row(&plain);
     print_bench_row(&raw);
@@ -611,8 +611,11 @@ async fn run_bench(
 struct BenchResult {
     workload: &'static str,
     put_ms: u128,
+    flush_ms: Option<u128>,
+    put_latency: Option<LatencySummary>,
     plan_ms: Option<u128>,
     read_ms: u128,
+    read_latency: Option<LatencySummary>,
     logical_bytes: u64,
     physical_value_bytes: Option<u64>,
     chunks: Option<u64>,
@@ -625,6 +628,32 @@ impl BenchResult {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LatencySummary {
+    p50_us: u128,
+    p95_us: u128,
+    p99_us: u128,
+}
+
+fn latency_summary(mut samples: Vec<u128>) -> Option<LatencySummary> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    Some(LatencySummary {
+        p50_us: percentile(&samples, 50),
+        p95_us: percentile(&samples, 95),
+        p99_us: percentile(&samples, 99),
+    })
+}
+
+fn percentile(sorted_samples: &[u128], percentile: usize) -> u128 {
+    let ix = ((sorted_samples.len() * percentile).div_ceil(100))
+        .saturating_sub(1)
+        .min(sorted_samples.len() - 1);
+    sorted_samples[ix]
 }
 
 async fn generate_values(case: BenchCase) -> Result<Vec<Vec<u8>>> {
@@ -759,18 +788,26 @@ async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResul
     let db = Db::open(db_path, object_store).await?;
 
     let put_start = Instant::now();
+    let mut put_latencies = Vec::with_capacity(values.len());
     for (ix, value) in values.iter().enumerate() {
+        let op_start = Instant::now();
         db.put(key_bytes(ix), value.as_slice()).await?;
+        put_latencies.push(op_start.elapsed().as_micros());
     }
+    let flush_start = Instant::now();
     db.flush().await?;
+    let flush_ms = flush_start.elapsed().as_millis();
     let put_ms = put_start.elapsed().as_millis();
 
     let read_start = Instant::now();
+    let mut read_latencies = Vec::with_capacity(values.len());
     let mut logical_bytes = 0_u64;
     for ix in 0..values.len() {
+        let op_start = Instant::now();
         let Some(value) = db.get(key_bytes(ix)).await? else {
             bail!("missing plain SlateDB bench key {ix}");
         };
+        read_latencies.push(op_start.elapsed().as_micros());
         logical_bytes += value.len() as u64;
     }
     let read_ms = read_start.elapsed().as_millis();
@@ -779,8 +816,11 @@ async fn bench_plain_slate(path: &Path, values: &[Vec<u8>]) -> Result<BenchResul
     Ok(BenchResult {
         workload: "plain-slate",
         put_ms,
+        flush_ms: Some(flush_ms),
+        put_latency: latency_summary(put_latencies),
         plan_ms: None,
         read_ms,
+        read_latency: latency_summary(read_latencies),
         logical_bytes,
         physical_value_bytes: Some(logical_bytes),
         chunks: None,
@@ -796,20 +836,28 @@ async fn bench_pilsmer_raw(
     let db = open_db(path, plan_options, stream_kind).await?;
 
     let put_start = Instant::now();
+    let mut put_latencies = Vec::with_capacity(values.len());
     for (ix, value) in values.iter().enumerate() {
+        let op_start = Instant::now();
         db.put(key_bytes(ix), value.as_slice()).await?;
+        put_latencies.push(op_start.elapsed().as_micros());
     }
+    let flush_start = Instant::now();
     db.flush().await?;
+    let flush_ms = flush_start.elapsed().as_millis();
     let put_ms = put_start.elapsed().as_millis();
 
     let read_start = Instant::now();
+    let mut read_latencies = Vec::with_capacity(values.len());
     let mut logical_bytes = 0_u64;
     let mut physical_value_bytes = 0_u64;
     for ix in 0..values.len() {
         let key = key_bytes(ix);
+        let op_start = Instant::now();
         let Some(value) = db.get(&key).await? else {
             bail!("missing PiLSMer raw bench key {ix}");
         };
+        read_latencies.push(op_start.elapsed().as_micros());
         logical_bytes += value.len() as u64;
         let Some(explain) = db.explain(&key).await? else {
             bail!("missing PiLSMer raw explain key {ix}");
@@ -822,8 +870,11 @@ async fn bench_pilsmer_raw(
     Ok(BenchResult {
         workload: "pilsmer-raw",
         put_ms,
+        flush_ms: Some(flush_ms),
+        put_latency: latency_summary(put_latencies),
         plan_ms: None,
         read_ms,
+        read_latency: latency_summary(read_latencies),
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
         chunks: None,
@@ -840,10 +891,15 @@ async fn bench_pilsmer_planned(
     let db = open_db(path, plan_options, stream_kind).await?;
 
     let put_start = Instant::now();
+    let mut put_latencies = Vec::with_capacity(values.len());
     for (ix, value) in values.iter().enumerate() {
+        let op_start = Instant::now();
         db.put(key_bytes(ix), value.as_slice()).await?;
+        put_latencies.push(op_start.elapsed().as_micros());
     }
+    let flush_start = Instant::now();
     db.flush().await?;
+    let flush_ms = flush_start.elapsed().as_millis();
     let put_ms = put_start.elapsed().as_millis();
 
     let plan_start = Instant::now();
@@ -861,6 +917,8 @@ async fn bench_pilsmer_planned(
 
     let mut result = collect_pilsmer_read_result(&db, workload, values.len()).await?;
     result.put_ms = put_ms;
+    result.flush_ms = Some(flush_ms);
+    result.put_latency = latency_summary(put_latencies);
     result.plan_ms = Some(plan_ms);
     db.close().await?;
     Ok(result)
@@ -876,10 +934,15 @@ async fn bench_pilsmer_vacuumed(
     let db = open_db(path, seed_options, stream_kind).await?;
 
     let put_start = Instant::now();
+    let mut put_latencies = Vec::with_capacity(values.len());
     for (ix, value) in values.iter().enumerate() {
+        let op_start = Instant::now();
         db.put(key_bytes(ix), value.as_slice()).await?;
+        put_latencies.push(op_start.elapsed().as_micros());
     }
+    let flush_start = Instant::now();
     db.flush().await?;
+    let flush_ms = flush_start.elapsed().as_millis();
     let put_ms = put_start.elapsed().as_millis();
 
     let rewrite_start = Instant::now();
@@ -920,6 +983,8 @@ async fn bench_pilsmer_vacuumed(
 
     let mut result = collect_pilsmer_read_result(&db, "pilsmer-vacuumed", values.len()).await?;
     result.put_ms = put_ms;
+    result.flush_ms = Some(flush_ms);
+    result.put_latency = latency_summary(put_latencies);
     result.plan_ms = Some(rewrite_ms);
     db.close().await?;
     Ok(result)
@@ -931,14 +996,17 @@ async fn collect_pilsmer_read_result(
     value_count: usize,
 ) -> Result<BenchResult> {
     let read_start = Instant::now();
+    let mut read_latencies = Vec::with_capacity(value_count);
     let mut logical_bytes = 0_u64;
     let mut physical_value_bytes = 0_u64;
     let mut chunks = 0_u64;
     for ix in 0..value_count {
         let key = key_bytes(ix);
+        let op_start = Instant::now();
         let Some(value) = db.get(&key).await? else {
             bail!("missing PiLSMer bench key {ix}");
         };
+        read_latencies.push(op_start.elapsed().as_micros());
         logical_bytes += value.len() as u64;
         let Some(explain) = db.explain(&key).await? else {
             bail!("missing PiLSMer bench explain key {ix}");
@@ -951,8 +1019,11 @@ async fn collect_pilsmer_read_result(
     Ok(BenchResult {
         workload,
         put_ms: 0,
+        flush_ms: None,
+        put_latency: None,
         plan_ms: None,
         read_ms,
+        read_latency: latency_summary(read_latencies),
         logical_bytes,
         physical_value_bytes: Some(physical_value_bytes),
         chunks: Some(chunks),
@@ -965,11 +1036,17 @@ fn key_bytes(ix: usize) -> Vec<u8> {
 
 fn print_bench_row(result: &BenchResult) {
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         result.workload,
         result.put_ms,
+        optional_u128(result.flush_ms),
+        optional_latency(result.put_latency, |latency| latency.p50_us),
+        optional_latency(result.put_latency, |latency| latency.p95_us),
         optional_u128(result.plan_ms),
         result.read_ms,
+        optional_latency(result.read_latency, |latency| latency.p50_us),
+        optional_latency(result.read_latency, |latency| latency.p95_us),
+        optional_latency(result.read_latency, |latency| latency.p99_us),
         result.logical_bytes,
         optional_u64(result.physical_value_bytes),
         optional_u64(result.chunks),
@@ -979,6 +1056,13 @@ fn print_bench_row(result: &BenchResult) {
 
 fn optional_u128(value: Option<u128>) -> String {
     value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+fn optional_latency(
+    value: Option<LatencySummary>,
+    select: impl FnOnce(LatencySummary) -> u128,
+) -> String {
+    value.map_or_else(|| "-".to_string(), |value| select(value).to_string())
 }
 
 fn optional_u64(value: Option<u64>) -> String {

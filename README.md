@@ -111,7 +111,8 @@ rejects it because literal chunks are still user bytes.
 `bench` writes into a new directory and refuses to reuse an existing path. It
 compares plain SlateDB values, PiLSMer raw envelopes, compact binary plans,
 ceremonial plans, and post-vacuum plans. `--suite` runs the named workload
-matrix; without it, `--values` and `--size` apply to the selected workload.
+matrix; without it, `--values` and `--size` apply to the selected workload. Rows
+include aggregate times, flush time, put p50/p95, and read p50/p95/p99.
 
 `metrics` combines a scan-derived storage snapshot with runtime counters for
 planner, reconstruction, and app-level vacuum activity in the current process.
