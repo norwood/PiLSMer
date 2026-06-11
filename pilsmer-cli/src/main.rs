@@ -10,8 +10,8 @@ use pilsmer_core::{
     StreamIndexOptions, StreamRegistry,
 };
 use pilsmer_slate::{
-    run_compactor_for, CompactionMode, PiLsmCompactionFilterSupplier, PiLsmDb, PiLsmOptions,
-    RewriteStatus,
+    run_compactor_with_options, CompactionMode, PiLsmCompactionFilterSupplier,
+    PiLsmCompactorOptions, PiLsmDb, PiLsmOptions, RewriteStatus,
 };
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::ObjectStore;
@@ -60,8 +60,16 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 1000)]
         run_ms: u64,
-        #[arg(long, value_enum, default_value_t = CliCompactionMode::Normal)]
-        mode: CliCompactionMode,
+        #[arg(long, default_value_t = 50)]
+        poll_ms: u64,
+        #[arg(long, default_value_t = 4)]
+        min_compaction_sources: usize,
+        #[arg(long, value_enum)]
+        mode: Option<CliCompactionMode>,
+        #[arg(long)]
+        into_nonexistence: bool,
+        #[arg(long, value_enum)]
+        humiliation: Option<Humiliation>,
         #[arg(long)]
         strict_envelopes: bool,
         #[arg(long)]
@@ -86,6 +94,12 @@ impl From<CliCompactionMode> for CompactionMode {
             CliCompactionMode::VacuumMeaning => CompactionMode::VacuumMeaning,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Humiliation {
+    Modest,
+    Maximum,
 }
 
 #[tokio::main]
@@ -157,28 +171,67 @@ async fn main() -> Result<()> {
         Command::Compact {
             path,
             run_ms,
+            poll_ms,
+            min_compaction_sources,
             mode,
+            into_nonexistence,
+            humiliation,
             strict_envelopes,
             ignore_snapshot_representation_safety,
         } => {
+            if min_compaction_sources < 2 {
+                bail!("--min-compaction-sources must be at least 2");
+            }
+            let mut compact_plan_options = plan_options.clone();
+            let mode = compact_mode(mode, into_nonexistence, humiliation)?;
+            if matches!(mode, CompactionMode::ForceRawToPlan) && compact_plan_options.allow_literals
+            {
+                bail!("--allow-literals conflicts with forced compaction into plans");
+            }
+            if humiliation == Some(Humiliation::Maximum) {
+                compact_plan_options.max_k = 1;
+            }
             let (object_store, db_path) = open_local_store(&path)?;
-            let runtime = build_runtime(&plan_options).await?;
+            let runtime = build_runtime(&compact_plan_options).await?;
             let supplier = runtime.supplier.with_options(
-                mode.into(),
+                mode,
                 strict_envelopes,
                 !ignore_snapshot_representation_safety,
             );
-            run_compactor_for(
+            run_compactor_with_options(
                 db_path,
                 object_store,
                 supplier,
-                Duration::from_millis(run_ms),
+                PiLsmCompactorOptions {
+                    run_for: Duration::from_millis(run_ms),
+                    poll_interval: Duration::from_millis(poll_ms),
+                    min_compaction_sources,
+                },
             )
             .await?;
         }
     }
 
     Ok(())
+}
+
+fn compact_mode(
+    mode: Option<CliCompactionMode>,
+    into_nonexistence: bool,
+    humiliation: Option<Humiliation>,
+) -> Result<CompactionMode> {
+    if mode.is_some() && into_nonexistence {
+        bail!("--mode conflicts with --into-nonexistence");
+    }
+    if mode.is_some() && humiliation == Some(Humiliation::Maximum) {
+        bail!("--mode conflicts with --humiliation maximum");
+    }
+
+    if into_nonexistence || humiliation == Some(Humiliation::Maximum) {
+        Ok(CompactionMode::ForceRawToPlan)
+    } else {
+        Ok(mode.unwrap_or(CliCompactionMode::Normal).into())
+    }
 }
 
 async fn open_db(path: &Path, plan_options: &PlanOptions) -> Result<PiLsmDb> {

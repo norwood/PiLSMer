@@ -12,7 +12,6 @@ sha2 = "0.10"
 slatedb = { version = "0.13.1", features = ["compaction_filters"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-tokio-util = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

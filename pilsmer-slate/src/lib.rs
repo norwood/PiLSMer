@@ -12,17 +12,33 @@ use pilsmer_core::{
     Result as CoreResult, StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
-use slatedb::admin::AdminBuilder;
+use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::object_store::path::Path as ObjectStorePath;
 use slatedb::object_store::ObjectStore;
 use slatedb::{CompactorBuilder, Db, DbIterator};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
-use tokio_util::sync::CancellationToken;
 
 mod compaction_filter;
 
 pub type Result<T> = std::result::Result<T, PiLsmDbError>;
+
+#[derive(Clone, Debug)]
+pub struct PiLsmCompactorOptions {
+    pub run_for: Duration,
+    pub poll_interval: Duration,
+    pub min_compaction_sources: usize,
+}
+
+impl Default for PiLsmCompactorOptions {
+    fn default() -> Self {
+        Self {
+            run_for: Duration::from_secs(1),
+            poll_interval: Duration::from_millis(50),
+            min_compaction_sources: 4,
+        }
+    }
+}
 
 pub async fn run_compactor_for<P>(
     path: P,
@@ -33,22 +49,69 @@ pub async fn run_compactor_for<P>(
 where
     P: Into<ObjectStorePath>,
 {
-    let cancellation_token = CancellationToken::new();
-    let cancel_after = cancellation_token.clone();
-    let cancel_task = tokio::spawn(async move {
-        tokio::time::sleep(run_for).await;
-        cancel_after.cancel();
+    run_compactor_with_options(
+        path,
+        object_store,
+        supplier,
+        PiLsmCompactorOptions {
+            run_for,
+            ..PiLsmCompactorOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn run_compactor_with_options<P>(
+    path: P,
+    object_store: Arc<dyn ObjectStore>,
+    supplier: Arc<PiLsmCompactionFilterSupplier>,
+    options: PiLsmCompactorOptions,
+) -> Result<()>
+where
+    P: Into<ObjectStorePath>,
+{
+    let compactor_options = compactor_options(options.clone());
+    let compactor = CompactorBuilder::new(path.into(), object_store)
+        .with_options(compactor_options)
+        .with_compaction_filter_supplier(supplier)
+        .build();
+
+    let mut run_task = tokio::spawn({
+        let compactor = compactor.clone();
+        async move { compactor.run().await }
     });
 
-    let result = AdminBuilder::new(path.into(), object_store)
-        .with_compaction_filter_supplier(supplier)
-        .build()
-        .run_compactor(cancellation_token)
-        .await;
+    tokio::select! {
+        result = &mut run_task => return flatten_compactor_result(result),
+        _ = tokio::time::sleep(options.run_for) => {}
+    }
 
-    cancel_task.abort();
-    result?;
-    Ok(())
+    compactor.stop().await?;
+    flatten_compactor_result(run_task.await)
+}
+
+fn compactor_options(options: PiLsmCompactorOptions) -> CompactorOptions {
+    let min_compaction_sources = options.min_compaction_sources.max(2);
+    let scheduler_options = SizeTieredCompactionSchedulerOptions {
+        min_compaction_sources,
+        max_compaction_sources: min_compaction_sources.max(8),
+        ..SizeTieredCompactionSchedulerOptions::default()
+    };
+    CompactorOptions {
+        poll_interval: options.poll_interval,
+        scheduler_options: scheduler_options.into(),
+        ..CompactorOptions::default()
+    }
+}
+
+fn flatten_compactor_result(
+    result: std::result::Result<std::result::Result<(), slatedb::Error>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err.into()),
+        Err(err) => Err(PiLsmDbError::CompactorTask(err.to_string())),
+    }
 }
 
 #[derive(Debug, Error)]
@@ -57,6 +120,8 @@ pub enum PiLsmDbError {
     Core(#[from] PiLsmError),
     #[error(transparent)]
     Slate(#[from] slatedb::Error),
+    #[error("compactor task failed: {0}")]
+    CompactorTask(String),
 }
 
 #[derive(Clone)]
