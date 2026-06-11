@@ -16,10 +16,11 @@ This is an MVP implementation of the core joke:
   dynamic-programming planning, reconstruction, and `explain`.
 - `pilsmer-slate` wraps SlateDB and can rewrite values through guarded app-level
   `plan-key`, `vacuum-meaning`, or a SlateDB compaction filter.
-- `pilsmer-cli` exposes local demo commands and scan-derived metrics.
+- `pilsmer-cli` exposes local demo commands, scan-derived metrics, and the
+  benchmark suite.
 
-The full benchmark suite and custom scheduler are still future work. A basic
-CLI benchmark and ceremonial codec are available.
+The custom scheduler is still future work. The standalone compactor, benchmark
+suite, and ceremonial codec are available.
 
 ## Demo
 
