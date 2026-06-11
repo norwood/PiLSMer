@@ -82,6 +82,8 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 1000)]
         run_ms: u64,
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
         #[arg(long, default_value_t = 50)]
         poll_ms: u64,
         #[arg(long, default_value_t = 4)]
@@ -290,6 +292,7 @@ async fn main() -> Result<()> {
         Command::Compact {
             path,
             run_ms,
+            runs,
             poll_ms,
             min_compaction_sources,
             mode,
@@ -300,6 +303,9 @@ async fn main() -> Result<()> {
         } => {
             if min_compaction_sources < 2 {
                 bail!("--min-compaction-sources must be at least 2");
+            }
+            if runs == 0 {
+                bail!("--runs must be at least 1");
             }
             let mut compact_plan_options = plan_options.clone();
             let mode = compact_mode(mode, into_nonexistence, humiliation)?;
@@ -318,17 +324,19 @@ async fn main() -> Result<()> {
                 strict_envelopes,
                 !ignore_snapshot_representation_safety,
             );
-            run_compactor_with_options(
-                db_path,
-                object_store,
-                supplier.clone(),
-                PiLsmCompactorOptions {
-                    run_for: Duration::from_millis(run_ms),
-                    poll_interval: Duration::from_millis(poll_ms),
-                    min_compaction_sources,
-                },
-            )
-            .await?;
+            for _ in 0..runs {
+                run_compactor_with_options(
+                    db_path.clone(),
+                    object_store.clone(),
+                    supplier.clone(),
+                    PiLsmCompactorOptions {
+                        run_for: Duration::from_millis(run_ms),
+                        poll_interval: Duration::from_millis(poll_ms),
+                        min_compaction_sources,
+                    },
+                )
+                .await?;
+            }
             print_compaction_filter_stats(&supplier.stats());
         }
         Command::Bench {

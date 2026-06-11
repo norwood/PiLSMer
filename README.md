@@ -70,7 +70,8 @@ PiLSMer compaction filter installed. It still uses SlateDB's size-tiered
 scheduler, so it is workload-dependent. The default `--min-compaction-sources`
 is 4; use 2 for toy workloads with multiple flushed L0 files. `plan-key` is the
 clearer single-key demo. After the bounded run, `compact` prints aggregate
-compaction-filter stats from that process.
+compaction-filter stats from that process. Use `--runs <n>` to repeat bounded
+compactor windows as a manual stand-in for periodic compaction.
 
 For maximum embarrassment:
 
