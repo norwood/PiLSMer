@@ -1365,7 +1365,7 @@ fn metric_philosophical_ratio(value: PhilosophicalCompressionRatio) -> String {
         PhilosophicalCompressionRatio::Finite(value) => format!("{value:.6}"),
         PhilosophicalCompressionRatio::Infinite => "infinity".to_string(),
         PhilosophicalCompressionRatio::Revoked => "revoked".to_string(),
-        PhilosophicalCompressionRatio::Undefined => "undefined".to_string(),
+        PhilosophicalCompressionRatio::Undefined => "NaN, but smug".to_string(),
     }
 }
 
@@ -1374,7 +1374,7 @@ fn philosophical_compression_ratio(value: PhilosophicalCompressionRatio) -> Stri
         PhilosophicalCompressionRatio::Finite(value) => format!("{value:.2}x"),
         PhilosophicalCompressionRatio::Infinite => "infinity".to_string(),
         PhilosophicalCompressionRatio::Revoked => "revoked".to_string(),
-        PhilosophicalCompressionRatio::Undefined => "undefined".to_string(),
+        PhilosophicalCompressionRatio::Undefined => "NaN, but smug".to_string(),
     }
 }
 
@@ -1705,5 +1705,17 @@ mod tests {
     fn png_crc_and_zlib_checksums_match_known_values() {
         assert_eq!(crc32(b"IEND"), 0xae42_6082);
         assert_eq!(adler32(b""), 1);
+    }
+
+    #[test]
+    fn undefined_philosophical_ratio_uses_spec_wording() {
+        assert_eq!(
+            philosophical_compression_ratio(PhilosophicalCompressionRatio::Undefined),
+            "NaN, but smug"
+        );
+        assert_eq!(
+            metric_philosophical_ratio(PhilosophicalCompressionRatio::Undefined),
+            "NaN, but smug"
+        );
     }
 }
