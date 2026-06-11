@@ -655,36 +655,30 @@ pre {
   gap: 20px;
   align-items: start;
 }
-.metric-table,
-.bench-table {
+.metric-table {
   width: 100%;
   border-collapse: collapse;
   font-family: var(--mono);
   font-size: 12px;
 }
 .metric-table th,
-.metric-table td,
-.bench-table th,
-.bench-table td {
+.metric-table td {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
 }
-.metric-table th,
-.bench-table th {
+.metric-table th {
   color: var(--text-faint);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
 }
-.metric-table td:last-child,
-.bench-table td:not(:first-child) {
+.metric-table td:last-child {
   color: var(--text);
   text-align: right;
 }
-.metric-table tr:last-child td,
-.bench-table tr:last-child td {
+.metric-table tr:last-child td {
   border-bottom: 0;
 }
 .sample-badge {
@@ -1126,58 +1120,19 @@ pilsmer_philosophical_purity_violations_total 0</pre>
     </div>
   </section>
 
-  <section id="benchmarks">
-    <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">05</span><span class="label">Benchmark-lite</span></div>
-      <h2 class="rv">Benchmarks, against common sense.</h2>
-      <p class="section-intro rv">This table is intentionally fake for layout iteration. The command is real and writes a fresh benchmark directory before comparing plain SlateDB, raw envelopes, planned values, ceremonial plans, and vacuumed plans.</p>
-      <div class="cmd rv" role="group" aria-label="Benchmark command">
-        <span class="prompt">$</span>
-        <code>cargo run -q --bin pilsmer -- bench /tmp/pilsmer-bench --workload tiny-json</code>
-        <button class="copy-btn" type="button" data-copy="cargo run -q --bin pilsmer -- bench /tmp/pilsmer-bench --workload tiny-json">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 9h10v10H9z" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="2"/></svg>
-          <span>Copy</span>
-        </button>
-      </div>
-      <div class="table-wrap rv">
-        <!-- placeholder values for layout only; replace before factual launch -->
-        <table class="bench-table" data-placeholder="true">
-          <thead>
-            <tr>
-              <th>Mode</th>
-              <th>put ms</th>
-              <th>read p95 us</th>
-              <th>physical bytes</th>
-              <th>chunks</th>
-              <th>metadata amp</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>plain SlateDB</td><td>12</td><td>180</td><td>64,000</td><td>0</td><td>1.00x</td></tr>
-            <tr><td>PiLSMer raw</td><td>18</td><td>240</td><td>72,400</td><td>0</td><td>1.13x</td></tr>
-            <tr><td>compact binary plans</td><td>94</td><td>1,900</td><td>312,800</td><td>1,920</td><td>4.88x</td></tr>
-            <tr><td>ceremonial plans</td><td>131</td><td>2,740</td><td>508,600</td><td>1,920</td><td>7.95x</td></tr>
-            <tr><td>post-vacuum plans</td><td>164</td><td>2,210</td><td>281,500</td><td>1,220</td><td>4.39x</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="sample-badge rv">fake benchmark rows</div>
-    </div>
-  </section>
-
   <section id="capabilities">
     <div class="wrap">
-      <div class="section-kicker rv"><span class="idx">06</span><span class="label">Capabilities</span></div>
+      <div class="section-kicker rv"><span class="idx">05</span><span class="label">Capabilities</span></div>
       <h2 class="rv">Properties of a worse storage engine.</h2>
       <div class="feature-grid">
-        <div class="feature rv"><span class="num">06.1</span><h3>SlateDB-backed LSM</h3><p>PiLSMer keeps the object-storage-native LSM and wraps the value semantics.</p></div>
-        <div class="feature rv"><span class="num">06.2</span><h3>Value envelopes</h3><p>Raw and planned values use typed envelopes so direct engine reads stay honest.</p></div>
-        <div class="feature rv"><span class="num">06.3</span><h3>Stream registry</h3><p>Plans refer to versioned stream identities and fingerprints, not a private cache file.</p></div>
-        <div class="feature rv"><span class="num">06.4</span><h3>Dynamic planner</h3><p>The planner chooses located chunks across indexed deterministic stream prefixes.</p></div>
-        <div class="feature rv"><span class="num">06.5</span><h3>Hash verification</h3><p>Reconstruction checks logical hashes before bytes leave the wrapper.</p></div>
-        <div class="feature rv"><span class="num">06.6</span><h3>Guarded planning</h3><p>`plan-key` rewrites a single key after checking the source envelope has not changed.</p></div>
-        <div class="feature rv"><span class="num">06.7</span><h3>VACUUM MEANING</h3><p>Existing values can be replanned under a budget to improve the shape of regret.</p></div>
-        <div class="feature rv"><span class="num">06.8</span><h3>Standalone compactor</h3><p>The compactor path makes compaction into nonexistence observable in demos.</p></div>
+        <div class="feature rv"><span class="num">05.1</span><h3>SlateDB-backed LSM</h3><p>PiLSMer keeps the object-storage-native LSM and wraps the value semantics.</p></div>
+        <div class="feature rv"><span class="num">05.2</span><h3>Value envelopes</h3><p>Raw and planned values use typed envelopes so direct engine reads stay honest.</p></div>
+        <div class="feature rv"><span class="num">05.3</span><h3>Stream registry</h3><p>Plans refer to versioned stream identities and fingerprints, not a private cache file.</p></div>
+        <div class="feature rv"><span class="num">05.4</span><h3>Dynamic planner</h3><p>The planner chooses located chunks across indexed deterministic stream prefixes.</p></div>
+        <div class="feature rv"><span class="num">05.5</span><h3>Hash verification</h3><p>Reconstruction checks logical hashes before bytes leave the wrapper.</p></div>
+        <div class="feature rv"><span class="num">05.6</span><h3>Guarded planning</h3><p>`plan-key` rewrites a single key after checking the source envelope has not changed.</p></div>
+        <div class="feature rv"><span class="num">05.7</span><h3>VACUUM MEANING</h3><p>Existing values can be replanned under a budget to improve the shape of regret.</p></div>
+        <div class="feature rv"><span class="num">05.8</span><h3>Standalone compactor</h3><p>The compactor path makes compaction into nonexistence observable in demos.</p></div>
       </div>
     </div>
   </section>
