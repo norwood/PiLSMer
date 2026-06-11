@@ -199,6 +199,29 @@ pub struct PiLsmIterator {
     decode_limits: DecodeLimits,
 }
 
+pub struct PiLsmEnvelopeIterator {
+    inner: DbIterator,
+    decode_limits: DecodeLimits,
+}
+
+pub struct PiLsmExplainIterator {
+    inner: DbIterator,
+    decode_limits: DecodeLimits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiLsmEnvelopeKeyValue {
+    pub key: Bytes,
+    pub envelope: ValueEnvelope,
+    pub physical_value_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PiLsmExplainKeyValue {
+    pub key: Bytes,
+    pub explain: ExplainValue,
+}
+
 impl PiLsmDb {
     pub async fn open<P>(
         path: P,
@@ -303,6 +326,28 @@ impl PiLsmDb {
         Ok(PiLsmIterator {
             inner: self.inner.scan(range).await?,
             reconstructor: self.reconstructor.clone(),
+            decode_limits: self.decode_limits.clone(),
+        })
+    }
+
+    pub async fn scan_envelopes<K, R>(&self, range: R) -> Result<PiLsmEnvelopeIterator>
+    where
+        K: AsRef<[u8]> + Send,
+        R: RangeBounds<K> + Send,
+    {
+        Ok(PiLsmEnvelopeIterator {
+            inner: self.inner.scan(range).await?,
+            decode_limits: self.decode_limits.clone(),
+        })
+    }
+
+    pub async fn scan_explain<K, R>(&self, range: R) -> Result<PiLsmExplainIterator>
+    where
+        K: AsRef<[u8]> + Send,
+        R: RangeBounds<K> + Send,
+    {
+        Ok(PiLsmExplainIterator {
+            inner: self.inner.scan(range).await?,
             decode_limits: self.decode_limits.clone(),
         })
     }
@@ -476,6 +521,34 @@ impl PiLsmDb {
     }
 }
 
+impl PiLsmEnvelopeIterator {
+    pub async fn next(&mut self) -> Result<Option<PiLsmEnvelopeKeyValue>> {
+        let Some(kv) = self.inner.next().await? else {
+            return Ok(None);
+        };
+        let physical_value_bytes = kv.value.len();
+        let envelope = ValueEnvelope::decode(&kv.value, &self.decode_limits)?;
+        Ok(Some(PiLsmEnvelopeKeyValue {
+            key: kv.key,
+            envelope,
+            physical_value_bytes,
+        }))
+    }
+}
+
+impl PiLsmExplainIterator {
+    pub async fn next(&mut self) -> Result<Option<PiLsmExplainKeyValue>> {
+        let Some(kv) = self.inner.next().await? else {
+            return Ok(None);
+        };
+        let envelope = ValueEnvelope::decode(&kv.value, &self.decode_limits)?;
+        Ok(Some(PiLsmExplainKeyValue {
+            key: kv.key,
+            explain: explain_envelope(&envelope, kv.value.len()),
+        }))
+    }
+}
+
 impl PiLsmIterator {
     pub async fn next(&mut self) -> Result<Option<PiLsmKeyValue>> {
         let Some(kv) = self.inner.next().await? else {
@@ -537,7 +610,8 @@ mod tests {
 
     use bytes::Bytes;
     use pilsmer_core::{
-        ByteStream, PlanOptions, PrefixByteStream, StreamId, StreamIndex, StreamIndexOptions,
+        ByteStream, PlanOptions, PrefixByteStream, StorageClass, StreamId, StreamIndex,
+        StreamIndexOptions,
     };
     use slatedb::object_store::memory::InMemory;
 
@@ -622,5 +696,41 @@ mod tests {
             Bytes::from_static(b"def")
         );
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_inspection_scans_do_not_reconstruct_values() {
+        let db = demo_db(b"abcdef").await;
+        db.put(b"a", b"abc").await.unwrap();
+        db.plan_key(b"a", PlanOptions::default()).await.unwrap();
+        db.put(b"b", b"def").await.unwrap();
+
+        let mut envelopes = db
+            .scan_envelopes::<Vec<u8>, _>(b"a".to_vec()..b"z".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            envelopes.next().await.unwrap().unwrap().envelope,
+            ValueEnvelope::Plan(_)
+        ));
+        assert!(matches!(
+            envelopes.next().await.unwrap().unwrap().envelope,
+            ValueEnvelope::Raw(_)
+        ));
+        assert!(envelopes.next().await.unwrap().is_none());
+
+        let mut explain = db
+            .scan_explain::<Vec<u8>, _>(b"a".to_vec()..b"z".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            explain.next().await.unwrap().unwrap().explain.storage_class,
+            StorageClass::Plan
+        );
+        assert_eq!(
+            explain.next().await.unwrap().unwrap().explain.storage_class,
+            StorageClass::Raw
+        );
+        assert!(explain.next().await.unwrap().is_none());
     }
 }
