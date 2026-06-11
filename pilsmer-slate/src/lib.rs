@@ -9,8 +9,8 @@ pub use compaction_filter::{
     CompactionMode, PiLsmCompactionFilterStats, PiLsmCompactionFilterSupplier,
 };
 use pilsmer_core::{
-    explain_envelope, DecodeLimits, ExplainValue, PhilosophicalCompressionRatio, PiLsmError,
-    PlanOptions, Planner, Purity, Reconstructor, Result as CoreResult, StorageClass,
+    explain_envelope, DecodeLimits, ExplainValue, LogicalHashKind, PhilosophicalCompressionRatio,
+    PiLsmError, PlanOptions, Planner, Purity, Reconstructor, Result as CoreResult, StorageClass,
     StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
@@ -132,6 +132,7 @@ pub struct PiLsmOptions {
     pub planner: Planner,
     pub decode_limits: DecodeLimits,
     pub max_reconstruct_bytes: u64,
+    pub reconstruction_cache_bytes: u64,
 }
 
 impl PiLsmOptions {
@@ -141,6 +142,7 @@ impl PiLsmOptions {
             planner,
             decode_limits: DecodeLimits::default(),
             max_reconstruct_bytes: 64 * 1024 * 1024,
+            reconstruction_cache_bytes: 0,
         }
     }
 }
@@ -155,6 +157,7 @@ pub struct PiLsmDb {
     stream_prefix_bytes_indexed: u64,
     locks: Arc<KeyLocks>,
     counters: Arc<OperationCounters>,
+    reconstruction_cache: Arc<ReconstructionCache>,
 }
 
 #[derive(Default)]
@@ -185,6 +188,63 @@ struct OperationCounters {
     representation_entropy_excuses_total: AtomicU64,
 }
 
+#[derive(Default)]
+struct ReconstructionCache {
+    inner: Mutex<ReconstructionCacheState>,
+}
+
+#[derive(Default)]
+struct ReconstructionCacheState {
+    max_bytes: u64,
+    current_bytes: u64,
+    values: HashMap<ReconstructionCacheKey, Bytes>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ReconstructionCacheKey {
+    hash_kind: u8,
+    hash: [u8; 16],
+}
+
+impl ReconstructionCache {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            inner: Mutex::new(ReconstructionCacheState {
+                max_bytes,
+                ..ReconstructionCacheState::default()
+            }),
+        }
+    }
+
+    fn get(&self, key: ReconstructionCacheKey) -> Option<Bytes> {
+        let cache = self.inner.lock().expect("reconstruction cache poisoned");
+        cache.values.get(&key).cloned()
+    }
+
+    fn insert(&self, key: ReconstructionCacheKey, value: Bytes) -> u64 {
+        let mut cache = self.inner.lock().expect("reconstruction cache poisoned");
+        if cache.max_bytes == 0 || value.len() as u64 > cache.max_bytes {
+            return cache.current_bytes;
+        }
+        if cache.values.contains_key(&key) {
+            return cache.current_bytes;
+        }
+        while cache.current_bytes.saturating_add(value.len() as u64) > cache.max_bytes {
+            let Some(victim) = cache.values.keys().next().copied() else {
+                break;
+            };
+            if let Some(removed) = cache.values.remove(&victim) {
+                cache.current_bytes = cache.current_bytes.saturating_sub(removed.len() as u64);
+            }
+        }
+        if cache.current_bytes.saturating_add(value.len() as u64) <= cache.max_bytes {
+            cache.current_bytes += value.len() as u64;
+            cache.values.insert(key, value);
+        }
+        cache.current_bytes
+    }
+}
+
 impl OperationCounters {
     fn add_raw_bytes_converted(&self, bytes: u64) {
         self.add(&self.raw_bytes_converted_total, bytes);
@@ -208,6 +268,11 @@ impl OperationCounters {
 
     fn increment_entropy_excuses(&self) {
         self.add(&self.representation_entropy_excuses_total, 1);
+    }
+
+    fn set_reconstruction_cache_bytes(&self, bytes: u64) {
+        self.reconstruction_cache_bytes
+            .store(bytes, Ordering::Relaxed);
     }
 
     fn load(&self, counter: &AtomicU64) -> u64 {
@@ -306,6 +371,7 @@ pub struct PiLsmIterator {
     reconstruct: bool,
     max_reconstruct_bytes: u64,
     counters: Arc<OperationCounters>,
+    reconstruction_cache: Arc<ReconstructionCache>,
 }
 
 pub struct PiLsmEnvelopeIterator {
@@ -457,6 +523,9 @@ impl PiLsmDb {
             stream_prefix_bytes_indexed,
             locks: Arc::new(KeyLocks::default()),
             counters: Arc::new(OperationCounters::default()),
+            reconstruction_cache: Arc::new(ReconstructionCache::new(
+                opts.reconstruction_cache_bytes,
+            )),
         }
     }
 
@@ -572,6 +641,7 @@ impl PiLsmDb {
                 .max_reconstruct_bytes
                 .unwrap_or(self.max_reconstruct_bytes),
             counters: self.counters.clone(),
+            reconstruction_cache: self.reconstruction_cache.clone(),
         })
     }
 
@@ -806,11 +876,22 @@ impl PiLsmDb {
         max_reconstruct_bytes: u64,
     ) -> CoreResult<Bytes> {
         let start = Instant::now();
+        if plan.logical_len > max_reconstruct_bytes {
+            return Err(PiLsmError::DecodeLimitExceeded("max_reconstruct_bytes"));
+        }
+        let cache_key = reconstruction_cache_key(plan);
+        if let Some(value) = self.reconstruction_cache.get(cache_key) {
+            return Ok(value);
+        }
         let result = self
             .reconstructor
             .reconstruct_with_limit(plan, max_reconstruct_bytes)
             .await;
         self.counters.add_reconstruction_duration(start.elapsed());
+        if let Ok(value) = &result {
+            let bytes = self.reconstruction_cache.insert(cache_key, value.clone());
+            self.counters.set_reconstruction_cache_bytes(bytes);
+        }
         result
     }
 
@@ -898,13 +979,23 @@ impl PiLsmIterator {
         let value = match envelope {
             ValueEnvelope::Raw(bytes) => bytes,
             ValueEnvelope::Plan(plan) => {
+                if plan.logical_len > self.max_reconstruct_bytes {
+                    return Err(PiLsmError::DecodeLimitExceeded("max_reconstruct_bytes").into());
+                }
+                let cache_key = reconstruction_cache_key(&plan);
+                if let Some(value) = self.reconstruction_cache.get(cache_key) {
+                    return Ok(Some(PiLsmKeyValue { key: kv.key, value }));
+                }
                 let start = Instant::now();
                 let result = self
                     .reconstructor
                     .reconstruct_with_limit(&plan, self.max_reconstruct_bytes)
                     .await;
                 self.counters.add_reconstruction_duration(start.elapsed());
-                result?
+                let value = result?;
+                let bytes = self.reconstruction_cache.insert(cache_key, value.clone());
+                self.counters.set_reconstruction_cache_bytes(bytes);
+                value
             }
         };
         Ok(Some(PiLsmKeyValue { key: kv.key, value }))
@@ -989,6 +1080,9 @@ impl PiLsmMetrics {
         self.vacuum_meaning_improvements_total =
             counters.load(&counters.vacuum_meaning_improvements_total);
         self.reconstruction_cache_bytes = counters.load(&counters.reconstruction_cache_bytes);
+        if self.reconstruction_cache_bytes > 0 {
+            self.philosophical_purity_violations_total += 1;
+        }
         self.representation_entropy_excuses_total =
             counters.load(&counters.representation_entropy_excuses_total);
     }
@@ -1026,6 +1120,20 @@ fn nanos_to_seconds(nanos: u64) -> f64 {
     nanos as f64 / 1_000_000_000.0
 }
 
+fn reconstruction_cache_key(plan: &pilsmer_core::ReconstructionPlan) -> ReconstructionCacheKey {
+    ReconstructionCacheKey {
+        hash_kind: logical_hash_kind_tag(plan.logical_hash.kind),
+        hash: plan.logical_hash.bytes,
+    }
+}
+
+fn logical_hash_kind_tag(kind: LogicalHashKind) -> u8 {
+    match kind {
+        LogicalHashKind::Blake3_128 => 1,
+        LogicalHashKind::Sha256_128 => 2,
+    }
+}
+
 fn envelope_hash(bytes: &[u8]) -> [u8; 32] {
     let hash = Sha256::digest(bytes);
     let mut out = [0_u8; 32];
@@ -1061,12 +1169,20 @@ mod tests {
     use super::*;
 
     async fn demo_db(prefix: &'static [u8]) -> PiLsmDb {
-        demo_db_with_reconstruct_limit(prefix, 64 * 1024 * 1024).await
+        demo_db_with_reconstruct_options(prefix, 64 * 1024 * 1024, 0).await
     }
 
     async fn demo_db_with_reconstruct_limit(
         prefix: &'static [u8],
         max_reconstruct_bytes: u64,
+    ) -> PiLsmDb {
+        demo_db_with_reconstruct_options(prefix, max_reconstruct_bytes, 0).await
+    }
+
+    async fn demo_db_with_reconstruct_options(
+        prefix: &'static [u8],
+        max_reconstruct_bytes: u64,
+        reconstruction_cache_bytes: u64,
     ) -> PiLsmDb {
         let stream: Arc<dyn ByteStream> = Arc::new(PrefixByteStream::new(
             StreamId::PiHexFractionPrefixV1 {
@@ -1101,6 +1217,7 @@ mod tests {
         );
         let mut opts = PiLsmOptions::new(registry, planner);
         opts.max_reconstruct_bytes = max_reconstruct_bytes;
+        opts.reconstruction_cache_bytes = reconstruction_cache_bytes;
         PiLsmDb::open("pilsmer-test", Arc::new(InMemory::new()), opts)
             .await
             .unwrap()
@@ -1174,6 +1291,22 @@ mod tests {
             Bytes::from_static(b"def")
         );
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn optional_reconstruction_cache_reports_bytes_and_purity_violation() {
+        let db = demo_db_with_reconstruct_options(b"abcdef", 64 * 1024 * 1024, 16).await;
+        db.put(b"a", b"abc").await.unwrap();
+        db.plan_key(b"a", PlanOptions::default()).await.unwrap();
+
+        assert_eq!(
+            db.get(b"a").await.unwrap(),
+            Some(Bytes::from_static(b"abc"))
+        );
+
+        let metrics = db.metrics().await.unwrap();
+        assert_eq!(metrics.reconstruction_cache_bytes, 3);
+        assert_eq!(metrics.philosophical_purity_violations_total, 1);
     }
 
     #[tokio::test]

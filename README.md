@@ -127,6 +127,9 @@ Normal `put` stores a raw envelope. `put_with_options` can create an immediate
 plan only for development and tests.
 `vacuum_meaning` accepts `VacuumOptions` for per-run planning and reconstruction
 limits.
+The reconstruction cache is off by default; set
+`PiLsmOptions::reconstruction_cache_bytes` to enable it and report the resulting
+philosophical purity violation.
 
 After any successful `put`, `plan-key`, `vacuum-meaning`, or compaction-filter
 rewrite, `get` should return the original logical bytes unless the key was
