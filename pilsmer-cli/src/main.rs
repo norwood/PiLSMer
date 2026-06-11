@@ -1,15 +1,20 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use pilsmer_core::{
-    ByteStream, PlanOptions, Planner, Sha256CounterStream, StreamIndex, StreamIndexOptions,
-    StreamRegistry,
+    ByteStream, PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex,
+    StreamIndexOptions, StreamRegistry,
 };
-use pilsmer_slate::{PiLsmDb, PiLsmOptions, RewriteStatus};
+use pilsmer_slate::{
+    run_compactor_for, CompactionMode, PiLsmCompactionFilterSupplier, PiLsmDb, PiLsmOptions,
+    RewriteStatus,
+};
 use slatedb::object_store::local::LocalFileSystem;
+use slatedb::object_store::ObjectStore;
 
 #[derive(Parser, Debug)]
 #[command(name = "pilsmer")]
@@ -51,6 +56,36 @@ enum Command {
         path: PathBuf,
         key: String,
     },
+    Compact {
+        path: PathBuf,
+        #[arg(long, default_value_t = 1000)]
+        run_ms: u64,
+        #[arg(long, value_enum, default_value_t = CliCompactionMode::Normal)]
+        mode: CliCompactionMode,
+        #[arg(long)]
+        strict_envelopes: bool,
+        #[arg(long)]
+        ignore_snapshot_representation_safety: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliCompactionMode {
+    Disabled,
+    Normal,
+    ForceRawToPlan,
+    VacuumMeaning,
+}
+
+impl From<CliCompactionMode> for CompactionMode {
+    fn from(mode: CliCompactionMode) -> Self {
+        match mode {
+            CliCompactionMode::Disabled => CompactionMode::Disabled,
+            CliCompactionMode::Normal => CompactionMode::Normal,
+            CliCompactionMode::ForceRawToPlan => CompactionMode::ForceRawToPlan,
+            CliCompactionMode::VacuumMeaning => CompactionMode::VacuumMeaning,
+        }
+    }
 }
 
 #[tokio::main]
@@ -119,16 +154,76 @@ async fn main() -> Result<()> {
             db.flush().await?;
             db.close().await?;
         }
+        Command::Compact {
+            path,
+            run_ms,
+            mode,
+            strict_envelopes,
+            ignore_snapshot_representation_safety,
+        } => {
+            let (object_store, db_path) = open_local_store(&path)?;
+            let runtime = build_runtime(&plan_options).await?;
+            let supplier = runtime.supplier.with_options(
+                mode.into(),
+                strict_envelopes,
+                !ignore_snapshot_representation_safety,
+            );
+            run_compactor_for(
+                db_path,
+                object_store,
+                supplier,
+                Duration::from_millis(run_ms),
+            )
+            .await?;
+        }
     }
 
     Ok(())
 }
 
 async fn open_db(path: &Path, plan_options: &PlanOptions) -> Result<PiLsmDb> {
+    let (object_store, db_path) = open_local_store(path)?;
+    let runtime = build_runtime(plan_options).await?;
+    Ok(PiLsmDb::open(db_path, object_store, runtime.opts).await?)
+}
+
+fn open_local_store(path: &Path) -> Result<(Arc<dyn ObjectStore>, String)> {
     let (root, db_path) = split_db_path(path)?;
     std::fs::create_dir_all(&root)
         .with_context(|| format!("creating object-store root {}", root.display()))?;
-    let object_store = Arc::new(LocalFileSystem::new_with_prefix(&root)?);
+    Ok((Arc::new(LocalFileSystem::new_with_prefix(&root)?), db_path))
+}
+
+struct Runtime {
+    opts: PiLsmOptions,
+    supplier: CompactionSupplierBuilder,
+}
+
+struct CompactionSupplierBuilder {
+    registry: StreamRegistry,
+    planner: Planner,
+}
+
+impl CompactionSupplierBuilder {
+    fn with_options(
+        &self,
+        mode: CompactionMode,
+        strict_envelopes: bool,
+        snapshot_safe_filtering: bool,
+    ) -> Arc<PiLsmCompactionFilterSupplier> {
+        Arc::new(
+            PiLsmCompactionFilterSupplier::new(
+                self.planner.clone(),
+                Reconstructor::new(self.registry.clone()),
+            )
+            .with_mode(mode)
+            .with_strict_envelopes(strict_envelopes)
+            .with_snapshot_safe_filtering(snapshot_safe_filtering),
+        )
+    }
+}
+
+async fn build_runtime(plan_options: &PlanOptions) -> Result<Runtime> {
     let stream: Arc<dyn ByteStream> = Arc::new(Sha256CounterStream::new([0_u8; 32]));
     let mut registry = StreamRegistry::new();
     registry.register(stream.clone());
@@ -145,8 +240,10 @@ async fn open_db(path: &Path, plan_options: &PlanOptions) -> Result<PiLsmDb> {
         .await?,
     );
     let planner = Planner::new(vec![index], registry.clone(), plan_options.clone());
-    let opts = PiLsmOptions::new(registry, planner);
-    Ok(PiLsmDb::open(db_path, object_store, opts).await?)
+    Ok(Runtime {
+        opts: PiLsmOptions::new(registry.clone(), planner.clone()),
+        supplier: CompactionSupplierBuilder { registry, planner },
+    })
 }
 
 fn split_db_path(path: &Path) -> Result<(PathBuf, String)> {

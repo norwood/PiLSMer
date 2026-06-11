@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 pub use compaction_filter::{
@@ -11,15 +12,44 @@ use pilsmer_core::{
     Result as CoreResult, StreamRegistry, ValueEnvelope,
 };
 use sha2::{Digest, Sha256};
+use slatedb::admin::AdminBuilder;
 use slatedb::object_store::path::Path as ObjectStorePath;
 use slatedb::object_store::ObjectStore;
 use slatedb::{CompactorBuilder, Db, DbIterator};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio_util::sync::CancellationToken;
 
 mod compaction_filter;
 
 pub type Result<T> = std::result::Result<T, PiLsmDbError>;
+
+pub async fn run_compactor_for<P>(
+    path: P,
+    object_store: Arc<dyn ObjectStore>,
+    supplier: Arc<PiLsmCompactionFilterSupplier>,
+    run_for: Duration,
+) -> Result<()>
+where
+    P: Into<ObjectStorePath>,
+{
+    let cancellation_token = CancellationToken::new();
+    let cancel_after = cancellation_token.clone();
+    let cancel_task = tokio::spawn(async move {
+        tokio::time::sleep(run_for).await;
+        cancel_after.cancel();
+    });
+
+    let result = AdminBuilder::new(path.into(), object_store)
+        .with_compaction_filter_supplier(supplier)
+        .build()
+        .run_compactor(cancellation_token)
+        .await;
+
+    cancel_task.abort();
+    result?;
+    Ok(())
+}
 
 #[derive(Debug, Error)]
 pub enum PiLsmDbError {
