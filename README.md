@@ -18,8 +18,8 @@ This is an MVP implementation of the core joke:
   `plan-key`, `vacuum-meaning`, or a SlateDB compaction filter.
 - `pilsmer-cli` exposes local demo commands.
 
-The full benchmark suite, ceremonial codec, and custom scheduler are still
-future work. A basic CLI benchmark is available.
+The full benchmark suite and custom scheduler are still future work. A basic
+CLI benchmark and ceremonial codec are available.
 
 ## Demo
 
@@ -82,7 +82,7 @@ pilsmer put <db> <key> <file>
 pilsmer get <db> <key>
 pilsmer explain <db> <key>
 pilsmer plan-key <db> <key>
-pilsmer vacuum-meaning <db> <key>
+pilsmer vacuum-meaning <db> <key>|--all [--budget 10s]
 pilsmer compact <db> [--mode normal|force-raw-to-plan|vacuum-meaning|disabled]
 pilsmer bench <db> --values 100 --size 1024
 ```

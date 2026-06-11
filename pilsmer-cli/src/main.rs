@@ -60,7 +60,11 @@ enum Command {
     },
     VacuumMeaning {
         path: PathBuf,
-        key: String,
+        key: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, value_parser = parse_duration)]
+        budget: Option<Duration>,
     },
     Compact {
         path: PathBuf,
@@ -208,10 +212,29 @@ async fn main() -> Result<()> {
             db.flush().await?;
             db.close().await?;
         }
-        Command::VacuumMeaning { path, key } => {
+        Command::VacuumMeaning {
+            path,
+            key,
+            all,
+            budget,
+        } => {
             let db = open_db(&path, &plan_options, stream_kind).await?;
-            let report = db.vacuum_meaning(key.as_bytes(), plan_options).await?;
-            print_rewrite_status(report.status);
+            match (all, key) {
+                (true, None) => {
+                    let report = vacuum_all(&db, &plan_options, budget).await?;
+                    println!("visited: {}", report.visited);
+                    println!("rewritten: {}", report.rewritten);
+                    println!("kept: {}", report.kept);
+                    println!("stale_or_missing: {}", report.stale_or_missing);
+                    println!("timed_out: {}", report.timed_out);
+                }
+                (false, Some(key)) => {
+                    let report = db.vacuum_meaning(key.as_bytes(), plan_options).await?;
+                    print_rewrite_status(report.status);
+                }
+                (true, Some(_)) => bail!("--all conflicts with a key argument"),
+                (false, None) => bail!("vacuum-meaning requires a key or --all"),
+            }
             db.flush().await?;
             db.close().await?;
         }
@@ -289,6 +312,80 @@ fn compact_mode(
         Ok(CompactionMode::ForceRawToPlan)
     } else {
         Ok(mode.unwrap_or(CliCompactionMode::Normal).into())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct VacuumAllReport {
+    visited: u64,
+    rewritten: u64,
+    kept: u64,
+    stale_or_missing: u64,
+    timed_out: bool,
+}
+
+async fn vacuum_all(
+    db: &PiLsmDb,
+    plan_options: &PlanOptions,
+    budget: Option<Duration>,
+) -> Result<VacuumAllReport> {
+    let start = Instant::now();
+    let mut keys = Vec::new();
+    let mut envelopes = db.scan_envelopes::<Vec<u8>, _>(Vec::<u8>::new()..).await?;
+    while let Some(kv) = envelopes.next().await? {
+        keys.push(kv.key);
+    }
+
+    let mut report = VacuumAllReport::default();
+    for key in keys {
+        if budget.is_some_and(|budget| start.elapsed() >= budget) {
+            report.timed_out = true;
+            break;
+        }
+
+        let rewrite = db.vacuum_meaning(&key, plan_options.clone()).await?;
+        report.visited += 1;
+        match rewrite.status {
+            RewriteStatus::Rewritten => report.rewritten += 1,
+            RewriteStatus::SkippedMissingKey | RewriteStatus::SkippedStaleSource => {
+                report.stale_or_missing += 1;
+            }
+            RewriteStatus::KeptAlreadyPlanned
+            | RewriteStatus::SkippedPlanningFailed
+            | RewriteStatus::SkippedNotImproved => report.kept += 1,
+        }
+    }
+
+    Ok(report)
+}
+
+fn parse_duration(input: &str) -> std::result::Result<Duration, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("duration must not be empty".to_string());
+    }
+
+    let split_at = input
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(input.len());
+    let (number, unit) = input.split_at(split_at);
+    if number.is_empty() {
+        return Err(format!("invalid duration {input:?}"));
+    }
+
+    let value = number
+        .parse::<u64>()
+        .map_err(|err| format!("invalid duration {input:?}: {err}"))?;
+    match unit {
+        "" | "ms" => Ok(Duration::from_millis(value)),
+        "s" => Ok(Duration::from_secs(value)),
+        "m" => value
+            .checked_mul(60)
+            .map(Duration::from_secs)
+            .ok_or_else(|| format!("duration is too large: {input:?}")),
+        other => Err(format!(
+            "unsupported duration unit {other:?}; use ms, s, or m"
+        )),
     }
 }
 
