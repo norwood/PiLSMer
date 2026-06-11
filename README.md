@@ -11,14 +11,15 @@ deterministic stream. Reads still work. Everything else gets worse.
 This is an MVP implementation of the core joke:
 
 - `pilsmer-core` encodes raw values and reconstruction plans.
-- `pilsmer-core` includes a deterministic `sha256-counter:v1` stream, packed
-  k-gram indexes, dynamic-programming planning, reconstruction, and `explain`.
+- `pilsmer-core` includes deterministic `sha256-counter:v1` and
+  `pi.hex-fraction-prefix:v1` streams, packed k-gram indexes,
+  dynamic-programming planning, reconstruction, and `explain`.
 - `pilsmer-slate` wraps SlateDB and can rewrite values through guarded app-level
   `plan-key`, `vacuum-meaning`, or a SlateDB compaction filter.
 - `pilsmer-cli` exposes local demo commands.
 
-The pi prefix stream, benchmark suite, ceremonial codec, and custom scheduler
-are still future work.
+The benchmark suite, ceremonial codec, and custom scheduler are still future
+work.
 
 ## Demo
 
@@ -37,6 +38,17 @@ cargo run -q --bin pilsmer -- get /tmp/pilsmer-demo/db invoice:123
 `plan-key` is the deterministic single-key demo path. It rewrites the latest
 value through the wrapper after checking that the source envelope has not
 changed.
+
+The default stream is `sha256-counter:v1` because it can produce arbitrary
+prefix sizes. The pi demo stream is available with `--stream pi-prefix` and a
+256-byte built-in prefix:
+
+```sh
+printf '\x24\x3f\x6a\x88' > /tmp/pilsmer-demo/pi-bytes.bin
+cargo run -q --bin pilsmer -- --stream pi-prefix put /tmp/pilsmer-demo/db pi:first4 /tmp/pilsmer-demo/pi-bytes.bin
+cargo run -q --bin pilsmer -- --stream pi-prefix plan-key /tmp/pilsmer-demo/db pi:first4
+cargo run -q --bin pilsmer -- --stream pi-prefix explain /tmp/pilsmer-demo/db pi:first4
+```
 
 The standalone compactor path is available too:
 
@@ -77,6 +89,7 @@ Global planning options:
 --prefix-bytes <bytes>
 --max-k <k>
 --allow-literals
+--stream sha256-counter|pi-prefix
 ```
 
 `--allow-literals` is for development and tests. Forced compaction into plans

@@ -6,8 +6,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use pilsmer_core::{
-    ByteStream, PlanOptions, Planner, Reconstructor, Sha256CounterStream, StreamIndex,
-    StreamIndexOptions, StreamRegistry,
+    pi_hex_fraction_prefix_stream, ByteStream, PlanOptions, Planner, Reconstructor,
+    Sha256CounterStream, StreamIndex, StreamIndexOptions, StreamRegistry,
+    PI_HEX_FRACTION_PREFIX_BYTES,
 };
 use pilsmer_slate::{
     run_compactor_with_options, CompactionMode, PiLsmCompactionFilterSupplier,
@@ -20,8 +21,10 @@ use slatedb::object_store::ObjectStore;
 #[command(name = "pilsmer")]
 #[command(about = "A SlateDB-backed key-value store that locates your data elsewhere.")]
 struct Cli {
-    #[arg(long, default_value_t = 1_048_576)]
-    prefix_bytes: u64,
+    #[arg(long, value_enum, default_value_t = StreamKind::Sha256Counter)]
+    stream: StreamKind,
+    #[arg(long)]
+    prefix_bytes: Option<u64>,
     #[arg(long, default_value_t = 3)]
     max_k: usize,
     #[arg(long)]
@@ -78,6 +81,12 @@ enum Command {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+enum StreamKind {
+    Sha256Counter,
+    PiPrefix,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliCompactionMode {
     Disabled,
     Normal,
@@ -105,8 +114,11 @@ enum Humiliation {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let stream_kind = cli.stream;
     let plan_options = PlanOptions {
-        max_prefix_len: cli.prefix_bytes,
+        max_prefix_len: cli
+            .prefix_bytes
+            .unwrap_or_else(|| default_prefix_bytes(stream_kind)),
         max_k: cli.max_k,
         allow_literals: cli.allow_literals,
         ..PlanOptions::default()
@@ -114,18 +126,18 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init { path } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             db.close().await?;
         }
         Command::Put { path, key, file } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             let value = read_value(&file)?;
             db.put(key.as_bytes(), value).await?;
             db.flush().await?;
             db.close().await?;
         }
         Command::Get { path, key } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             let Some(value) = db.get(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
             };
@@ -133,7 +145,7 @@ async fn main() -> Result<()> {
             db.close().await?;
         }
         Command::Explain { path, key } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             let Some(explain) = db.explain(key.as_bytes()).await? else {
                 bail!("key not found: {key}");
             };
@@ -155,14 +167,14 @@ async fn main() -> Result<()> {
             db.close().await?;
         }
         Command::PlanKey { path, key } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             let report = db.plan_key(key.as_bytes(), plan_options).await?;
             print_rewrite_status(report.status);
             db.flush().await?;
             db.close().await?;
         }
         Command::VacuumMeaning { path, key } => {
-            let db = open_db(&path, &plan_options).await?;
+            let db = open_db(&path, &plan_options, stream_kind).await?;
             let report = db.vacuum_meaning(key.as_bytes(), plan_options).await?;
             print_rewrite_status(report.status);
             db.flush().await?;
@@ -192,7 +204,7 @@ async fn main() -> Result<()> {
                 compact_plan_options.max_k = 1;
             }
             let (object_store, db_path) = open_local_store(&path)?;
-            let runtime = build_runtime(&compact_plan_options).await?;
+            let runtime = build_runtime(&compact_plan_options, stream_kind).await?;
             let supplier = runtime.supplier.with_options(
                 mode,
                 strict_envelopes,
@@ -215,6 +227,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn default_prefix_bytes(stream_kind: StreamKind) -> u64 {
+    match stream_kind {
+        StreamKind::Sha256Counter => 1_048_576,
+        StreamKind::PiPrefix => PI_HEX_FRACTION_PREFIX_BYTES as u64,
+    }
+}
+
 fn compact_mode(
     mode: Option<CliCompactionMode>,
     into_nonexistence: bool,
@@ -234,9 +253,13 @@ fn compact_mode(
     }
 }
 
-async fn open_db(path: &Path, plan_options: &PlanOptions) -> Result<PiLsmDb> {
+async fn open_db(
+    path: &Path,
+    plan_options: &PlanOptions,
+    stream_kind: StreamKind,
+) -> Result<PiLsmDb> {
     let (object_store, db_path) = open_local_store(path)?;
-    let runtime = build_runtime(plan_options).await?;
+    let runtime = build_runtime(plan_options, stream_kind).await?;
     Ok(PiLsmDb::open(db_path, object_store, runtime.opts).await?)
 }
 
@@ -276,8 +299,13 @@ impl CompactionSupplierBuilder {
     }
 }
 
-async fn build_runtime(plan_options: &PlanOptions) -> Result<Runtime> {
-    let stream: Arc<dyn ByteStream> = Arc::new(Sha256CounterStream::new([0_u8; 32]));
+async fn build_runtime(plan_options: &PlanOptions, stream_kind: StreamKind) -> Result<Runtime> {
+    let stream: Arc<dyn ByteStream> = match stream_kind {
+        StreamKind::Sha256Counter => Arc::new(Sha256CounterStream::new([0_u8; 32])),
+        StreamKind::PiPrefix => {
+            Arc::new(pi_hex_fraction_prefix_stream(plan_options.max_prefix_len)?)
+        }
+    };
     let mut registry = StreamRegistry::new();
     registry.register(stream.clone());
     let index = Arc::new(
