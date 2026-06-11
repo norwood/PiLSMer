@@ -362,8 +362,15 @@ impl Default for PutOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteHandle {
-    pub storage_class: StorageClass,
+    pub storage_class: WriteStorageClass,
     pub physical_value_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteStorageClass {
+    Raw,
+    Plan,
+    Tombstone,
 }
 
 pub struct PiLsmIterator {
@@ -569,8 +576,8 @@ impl PiLsmDb {
             ValueEnvelope::Raw(Bytes::copy_from_slice(value.as_ref()))
         };
         let storage_class = match &envelope {
-            ValueEnvelope::Raw(_) => StorageClass::Raw,
-            ValueEnvelope::Plan(_) => StorageClass::Plan,
+            ValueEnvelope::Raw(_) => WriteStorageClass::Raw,
+            ValueEnvelope::Plan(_) => WriteStorageClass::Plan,
         };
         let encoded = envelope.encode();
         let physical_value_bytes = encoded.len();
@@ -584,14 +591,17 @@ impl PiLsmDb {
         })
     }
 
-    pub async fn delete<K>(&self, key: K) -> Result<()>
+    pub async fn delete<K>(&self, key: K) -> Result<WriteHandle>
     where
         K: AsRef<[u8]> + Send,
     {
         let key_bytes = key.as_ref().to_vec();
         let _guard = self.lock_key(&key_bytes).await;
         self.inner.delete(key_bytes).await?;
-        Ok(())
+        Ok(WriteHandle {
+            storage_class: WriteStorageClass::Tombstone,
+            physical_value_bytes: 0,
+        })
     }
 
     pub async fn get<K>(&self, key: K) -> Result<Option<Bytes>>
@@ -1317,7 +1327,7 @@ mod tests {
     async fn put_get_and_plan_key_roundtrip() {
         let db = demo_db(b"abcdef").await;
         let handle = db.put(b"k", b"abc").await.unwrap();
-        assert_eq!(handle.storage_class, StorageClass::Raw);
+        assert_eq!(handle.storage_class, WriteStorageClass::Raw);
         assert_eq!(
             db.get(b"k").await.unwrap(),
             Some(Bytes::from_static(b"abc"))
@@ -1341,8 +1351,10 @@ mod tests {
         db.put(b"k", b"abc").await.unwrap();
         db.plan_key(b"k", PlanOptions::default()).await.unwrap();
 
-        db.delete(b"k").await.unwrap();
+        let handle = db.delete(b"k").await.unwrap();
 
+        assert_eq!(handle.storage_class, WriteStorageClass::Tombstone);
+        assert_eq!(handle.physical_value_bytes, 0);
         assert_eq!(db.get(b"k").await.unwrap(), None);
         assert!(db.get_envelope(b"k").await.unwrap().is_none());
         assert!(db.explain(b"k").await.unwrap().is_none());
@@ -1404,7 +1416,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(handle.storage_class, StorageClass::Plan);
+        assert_eq!(handle.storage_class, WriteStorageClass::Plan);
         assert!(handle.physical_value_bytes > 0);
         assert!(matches!(
             db.get_envelope(b"k").await.unwrap().unwrap(),

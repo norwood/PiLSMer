@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
@@ -132,6 +133,12 @@ impl Planner {
     }
 
     fn choose_chunks(&self, bytes: &[u8], options: &PlanOptions) -> Result<Vec<Choice>> {
+        if options.max_plan_millis_per_value == 0 {
+            return Err(PiLsmError::PlanningFailed("planning budget exceeded"));
+        }
+
+        let started = Instant::now();
+        let budget = Duration::from_millis(options.max_plan_millis_per_value);
         let n = bytes.len();
         let mut dp: Vec<Option<State>> = vec![None; n + 1];
         dp[n] = Some(State {
@@ -140,6 +147,9 @@ impl Planner {
         });
 
         for i in (0..n).rev() {
+            if i % 64 == 0 && started.elapsed() > budget {
+                return Err(PiLsmError::PlanningFailed("planning budget exceeded"));
+            }
             let mut best: Option<State> = None;
             for candidate in self.candidates_at(bytes, i, options) {
                 let next = i + candidate.len();
@@ -364,5 +374,39 @@ mod tests {
             plan.chunks.last(),
             Some(ChunkRef::Literal { bytes }) if bytes.as_ref() == b"z"
         ));
+    }
+
+    #[tokio::test]
+    async fn planner_enforces_per_value_budget() {
+        let stream = prefix_stream(b"abc");
+        let mut registry = StreamRegistry::new();
+        registry.register(stream.clone());
+        let index = Arc::new(
+            StreamIndex::build(
+                stream,
+                StreamIndexOptions {
+                    max_prefix_len: 3,
+                    max_k: 3,
+                    max_index_memory_bytes: 1024,
+                    max_offsets_per_kgram: 2,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let planner = Planner::new(vec![index], registry, PlanOptions::default());
+
+        let err = planner
+            .plan_with_options(
+                b"abc",
+                PlanOptions {
+                    max_plan_millis_per_value: 0,
+                    ..PlanOptions::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, PiLsmError::PlanningFailed("planning budget exceeded"));
     }
 }
